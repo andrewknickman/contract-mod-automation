@@ -5,16 +5,19 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
+from workflow_io import ask_integer, ask_text, choose_file, choose_save_file
+
+
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
-INPUT_DIR = BASE_DIR / "input"
-OUTPUT_DIR = BASE_DIR / "output"
+BASE_DIR = None
+INPUT_DIR = None
+OUTPUT_DIR = None
 
-j17_file = INPUT_DIR / "j17_file.xlsx"
-j1_previous_file = OUTPUT_DIR / "j1_previous_file.xlsx"
-eis_billing_file = INPUT_DIR / "EIS Billing Detail - FEB 2026 - HHS EIS PMO 75P00120F80177.xlsx"
-j17_updated_file = OUTPUT_DIR / "j17_updated_file.xlsx"
+j17_file = None
+j1_previous_file = None
+eis_billing_file = None
+j17_updated_file = None
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 current_option_period = 5
@@ -319,7 +322,67 @@ def save_to_excel(catalog_df, active_df, expired_df, original_file, output_path,
     wb.save(output_path)
 
 
+
+def configure_runtime():
+    global BASE_DIR, INPUT_DIR, OUTPUT_DIR
+    global j17_file, j1_previous_file, eis_billing_file, j17_updated_file
+    global current_option_period, current_month
+
+    print("Select the files needed to update the J17 workbook...")
+    source_j17_path = choose_file(
+        title="Select the source J17 workbook",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script06_source_j17_file",
+    )
+    updated_j1_path = choose_file(
+        title="Select the updated J1 previous workbook",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script06_updated_j1_previous_file",
+    )
+    billing_path = choose_file(
+        title="Select the EIS billing detail workbook",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script06_eis_billing_file",
+    )
+    output_j17_path = choose_save_file(
+        title="Choose where to save the updated J17 workbook",
+        default_name="j17_updated_file.xlsx",
+        filetypes=[("Excel Files", "*.xlsx")],
+        state_key="script06_output_j17_file",
+    )
+    current_option_period = ask_integer(
+        title="Current Option Period",
+        prompt="Enter the option period to use when reading the updated J1 workbook.",
+        default=current_option_period,
+    )
+
+    month_value = extract_month_from_filename(str(billing_path))
+    derived_month = current_month
+    if month_value:
+        month_lookup = {
+            'JAN': 'January', 'FEB': 'February', 'MAR': 'March', 'APR': 'April',
+            'MAY': 'May', 'JUN': 'June', 'JUL': 'July', 'AUG': 'August',
+            'SEP': 'September', 'OCT': 'October', 'NOV': 'November', 'DEC': 'December',
+        }
+        derived_month = month_lookup.get(month_value[-3:], current_month)
+    current_month = ask_text(
+        title="Billing Month",
+        prompt="Enter the month name used to identify expired subscriptions.",
+        default=derived_month,
+    )
+
+    j17_file = source_j17_path
+    j1_previous_file = updated_j1_path
+    eis_billing_file = billing_path
+    j17_updated_file = output_j17_path
+    OUTPUT_DIR = output_j17_path.parent
+    INPUT_DIR = source_j17_path.parent
+    BASE_DIR = output_j17_path.parent
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def main():
+    configure_runtime()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     month_value = extract_month_from_filename(str(eis_billing_file))

@@ -2,20 +2,24 @@ import pandas as pd
 import numpy as np
 import os
 import re
+from pathlib import Path
 from collections import Counter
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
+from workflow_io import ask_integer, choose_directory, choose_file
+
+
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data"
-INPUT_DIR = os.path.join(BASE_DIR, "input")
-PR_DIR = os.path.join(BASE_DIR, "pr_files")
-OUTPUT_COVERSHEETS_DIR = os.path.join(BASE_DIR, "output", "coversheets")
+BASE_DIR = None
+INPUT_DIR = None
+PR_DIR = None
+OUTPUT_COVERSHEETS_DIR = None
 
-j1_previous_file = os.path.join(INPUT_DIR, "j1_previous_file.xlsx")
-clin_table_file = os.path.join(INPUT_DIR, "clin_table_file.xls")
+j1_previous_file = None
+clin_table_file = None
 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
@@ -404,7 +408,48 @@ def create_coversheet(output_path, current_op_rows, oy_rows):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+
+def configure_runtime():
+    global BASE_DIR, INPUT_DIR, PR_DIR, OUTPUT_COVERSHEETS_DIR
+    global j1_previous_file, clin_table_file, CURRENT_OP
+
+    print("Select the source files and folders for coversheet generation...")
+    j1_previous_path = choose_file(
+        title="Select the J1 previous workbook",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script01_j1_previous_file",
+    )
+    clin_lookup_path = choose_file(
+        title="Select the CLIN lookup workbook",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script01_clin_lookup_file",
+    )
+    pr_dir_path = choose_directory(
+        title="Select the folder that contains the PR files",
+        state_key="script01_pr_directory",
+    )
+    output_dir_path = choose_directory(
+        title="Select the output folder for generated coversheets",
+        state_key="script01_output_coversheets_dir",
+    )
+    CURRENT_OP = ask_integer(
+        title="Current Option Period",
+        prompt="Enter the current option period used for the J1 catalog sheets.",
+        default=CURRENT_OP,
+    )
+
+    BASE_DIR = str(pr_dir_path.parent)
+    INPUT_DIR = str(j1_previous_path.parent)
+    PR_DIR = str(pr_dir_path)
+    OUTPUT_COVERSHEETS_DIR = str(output_dir_path)
+    j1_previous_file = str(j1_previous_path)
+    clin_table_file = str(clin_lookup_path)
+
+    Path(OUTPUT_COVERSHEETS_DIR).mkdir(parents=True, exist_ok=True)
+
+
 def main():
+    configure_runtime()
     os.makedirs(OUTPUT_COVERSHEETS_DIR, exist_ok=True)
 
     print("Loading J1 data ...")

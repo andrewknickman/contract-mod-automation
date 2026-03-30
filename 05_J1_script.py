@@ -13,17 +13,20 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from datetime import datetime
 import warnings
 
+from workflow_io import choose_file, choose_save_file
+
 warnings.filterwarnings('ignore')
 
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
-INPUT_DIR = BASE_DIR / "input"
-OUTPUT_DIR = BASE_DIR / "output"
 
-build_file = OUTPUT_DIR / "build_file.xlsx"
-j1_previous_file_input = INPUT_DIR / "j1_previous_file.xlsx"
-j1_previous_file = OUTPUT_DIR / "j1_previous_file.xlsx"
+# ─── Paths ────────────────────────────────────────────────────────────────────
+BASE_DIR = None
+INPUT_DIR = None
+OUTPUT_DIR = None
+
+build_file = None
+j1_previous_file_input = None
+j1_previous_file = None
 
 
 # ============================================================
@@ -441,8 +444,40 @@ def append_to_j1_sheet(j1_file_path, sheet_name, entries_df, start_price_id):
 # MAIN EXECUTION
 # ============================================================
 
+
+def configure_runtime():
+    global BASE_DIR, INPUT_DIR, OUTPUT_DIR, build_file, j1_previous_file_input, j1_previous_file
+
+    print("Select the files needed to update the J1 previous workbook...")
+    build_path = choose_file(
+        title="Select the generated Build workbook",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script05_build_file",
+    )
+    source_j1_path = choose_file(
+        title="Select the source J1 previous workbook",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script05_source_j1_previous_file",
+    )
+    output_j1_path = choose_save_file(
+        title="Choose where to save the updated J1 previous workbook",
+        default_name="j1_previous_file.xlsx",
+        filetypes=[("Excel Files", "*.xlsx")],
+        state_key="script05_output_j1_previous_file",
+    )
+
+    build_file = build_path
+    j1_previous_file_input = source_j1_path
+    j1_previous_file = output_j1_path
+    OUTPUT_DIR = output_j1_path.parent
+    INPUT_DIR = source_j1_path.parent
+    BASE_DIR = output_j1_path.parent
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def main():
     """Main function to execute the J1_Example automation."""
+    configure_runtime()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Copy the pristine j1_previous_file from input/ to output/ before modifying

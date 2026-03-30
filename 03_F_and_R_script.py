@@ -1,19 +1,22 @@
 import pandas as pd
 import os
 from pathlib import Path
+
+from workflow_io import choose_directory, choose_file, choose_save_file
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl import Workbook, load_workbook
 from collections import defaultdict
 import math
 
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
-OUTPUT_DIR = BASE_DIR / "output"
-PR_DIR = BASE_DIR / "pr_files"
 
-overview_file = OUTPUT_DIR / "overview_file.xlsx"
-f_r_output_file = OUTPUT_DIR / "f_r_output.xlsx"
+# ─── Paths ────────────────────────────────────────────────────────────────────
+BASE_DIR = None
+OUTPUT_DIR = None
+PR_DIR = None
+
+overview_file = None
+f_r_output_file = None
 
 
 def get_fr_pr_numbers(overview_path: Path):
@@ -194,6 +197,35 @@ def get_j1_rate(pr_file: Path, case_number: str, pricing_element: str):
     except Exception as e:
         print(f"  Error reading J1 sheet from {pr_file.name}: {e}")
         return None
+
+
+
+def configure_runtime():
+    global BASE_DIR, OUTPUT_DIR, PR_DIR, overview_file, f_r_output_file
+
+    print("Select the files and folders needed for the F&R build...")
+    overview_path = choose_file(
+        title="Select the overview workbook",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script03_overview_file",
+    )
+    pr_dir_path = choose_directory(
+        title="Select the folder that contains the PR files",
+        state_key="script03_pr_dir",
+    )
+    output_path = choose_save_file(
+        title="Choose where to save the F&R workbook",
+        default_name="f_r_output.xlsx",
+        filetypes=[("Excel Files", "*.xlsx")],
+        state_key="script03_fr_output_file",
+    )
+
+    overview_file = overview_path
+    PR_DIR = pr_dir_path
+    f_r_output_file = output_path
+    OUTPUT_DIR = output_path.parent
+    BASE_DIR = pr_dir_path.parent
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def build_FR():
@@ -426,4 +458,5 @@ def build_FR():
 
 
 if __name__ == "__main__":
+    configure_runtime()
     build_FR()

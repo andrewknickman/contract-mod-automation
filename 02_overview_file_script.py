@@ -6,15 +6,18 @@ from pathlib import Path
 import os
 from typing import Dict, List, Any, Optional
 
+from workflow_io import choose_directory, choose_file, choose_save_file
+
+
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
-INPUT_DIR = BASE_DIR / "input"
-OUTPUT_DIR = BASE_DIR / "output"
-COVERSHEET_FILES_DIR = OUTPUT_DIR / "coversheets"
+BASE_DIR = None
+INPUT_DIR = None
+OUTPUT_DIR = None
+COVERSHEET_FILES_DIR = None
 
-clin_table_file = INPUT_DIR / "clin_table_file.xls"
-overview_output_file = OUTPUT_DIR / "overview_file.xlsx"
+clin_table_file = None
+overview_output_file = None
 
 
 def cell_is_checked(val) -> bool:
@@ -629,8 +632,40 @@ def create_overview(coversheet_files: List[Path], output_path: str = 'overview_o
     return df
 
 
+
+def configure_runtime():
+    global BASE_DIR, INPUT_DIR, OUTPUT_DIR, COVERSHEET_FILES_DIR
+    global clin_table_file, overview_output_file
+
+    print("Select the coversheet folder and related files for overview generation...")
+    coversheets_dir = choose_directory(
+        title="Select the coversheets folder",
+        state_key="script02_coversheets_dir",
+    )
+    clin_lookup_path = choose_file(
+        title="Select the CLIN lookup workbook",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script02_clin_lookup_file",
+    )
+    overview_path = choose_save_file(
+        title="Choose where to save the overview workbook",
+        default_name="overview_file.xlsx",
+        filetypes=[("Excel Files", "*.xlsx")],
+        state_key="script02_overview_output_file",
+    )
+
+    COVERSHEET_FILES_DIR = coversheets_dir
+    OUTPUT_DIR = overview_path.parent
+    INPUT_DIR = clin_lookup_path.parent
+    BASE_DIR = coversheets_dir.parent
+    clin_table_file = clin_lookup_path
+    overview_output_file = overview_path
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def main():
     """Main function to process coversheet files."""
+    configure_runtime()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     if COVERSHEET_FILES_DIR.exists():

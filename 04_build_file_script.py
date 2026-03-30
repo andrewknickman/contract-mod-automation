@@ -13,6 +13,8 @@ import shutil
 from pathlib import Path
 import warnings
 from typing import Dict, List, Optional, Tuple
+
+from workflow_io import choose_directory, choose_file, choose_save_file
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -21,15 +23,16 @@ from openpyxl.utils import get_column_letter
 warnings.filterwarnings('ignore')
 
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
-INPUT_DIR = BASE_DIR / "input"
-OUTPUT_DIR = BASE_DIR / "output"
-PR_DIR = BASE_DIR / "pr_files"
-COVERSHEET_FILES_DIR = OUTPUT_DIR / "coversheets"
 
-build_file_input = INPUT_DIR / "build_file.xlsx"
-build_file_output = OUTPUT_DIR / "build_file.xlsx"
+# ─── Paths ────────────────────────────────────────────────────────────────────
+BASE_DIR = None
+INPUT_DIR = None
+OUTPUT_DIR = None
+PR_DIR = None
+COVERSHEET_FILES_DIR = None
+
+build_file_input = None
+build_file_output = None
 
 
 # ============================================================
@@ -1322,8 +1325,45 @@ def create_catalog_sheet(build_file_path: Path):
 # MAIN EXECUTION
 # ============================================================
 
+
+def configure_runtime():
+    global BASE_DIR, INPUT_DIR, OUTPUT_DIR, PR_DIR, COVERSHEET_FILES_DIR
+    global build_file_input, build_file_output
+
+    print("Select the template, folders, and output file for the Build process...")
+    build_template_path = choose_file(
+        title="Select the source Build workbook template",
+        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
+        state_key="script04_build_template_file",
+    )
+    coversheets_dir = choose_directory(
+        title="Select the coversheets folder",
+        state_key="script04_coversheets_dir",
+    )
+    pr_dir_path = choose_directory(
+        title="Select the folder that contains the PR files",
+        state_key="script04_pr_dir",
+    )
+    build_output_path = choose_save_file(
+        title="Choose where to save the generated Build workbook",
+        default_name="build_file.xlsx",
+        filetypes=[("Excel Files", "*.xlsx")],
+        state_key="script04_build_output_file",
+    )
+
+    build_file_input = build_template_path
+    build_file_output = build_output_path
+    COVERSHEET_FILES_DIR = coversheets_dir
+    PR_DIR = pr_dir_path
+    OUTPUT_DIR = build_output_path.parent
+    INPUT_DIR = build_template_path.parent
+    BASE_DIR = pr_dir_path.parent
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def main():
     """Main function to run both J.1 and Catalog automation."""
+    configure_runtime()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Copy the pristine build file from input/ to output/ before modifying
