@@ -1,92 +1,93 @@
-# WORKFLOW
+# Workflow Layout
 
-## Current Workflow Layout
-This project currently runs as a six-script pipeline. Each script produces an output workbook used by a later stage.
+## Current Workflow Structure
+The project currently runs as a six-step workflow. The new UI presents these steps in one guided desktop interface while using the existing processing logic underneath.
 
-## Script Order
-1. `01_final_coversheet_generation_script.py`
-2. `02_overview_file_script.py`
-3. `03_F_and_R_script.py`
-4. `04_build_file_script.py`
-5. `05_J1_script.py`
-6. `06_J17_file_script.py`
+## Step Order
+1. Coversheets
+2. Overview Workbook
+3. F&R Workbook
+4. Build Workbook
+5. Update J.1
+6. Update J.17
 
-## Input and Output Flow
-
-### 1. Coversheet Generation
-**Script:** `01_final_coversheet_generation_script.py`
-
-**Inputs**
-- source J.1 workbook
+## Step Inputs and Outputs
+### Step 1 - Coversheets
+Inputs:
+- source J.1 previous workbook
 - CLIN lookup workbook
 - PR workbook folder
+- coversheet output folder
 - current option period
 
-**Output**
+Output:
 - coversheet workbooks
 
----
-
-### 2. Overview File
-**Script:** `02_overview_file_script.py`
-
-**Inputs**
+### Step 2 - Overview Workbook
+Inputs:
 - coversheet workbook folder
 - CLIN lookup workbook
+- overview output workbook path
 
-**Output**
+Output:
 - overview workbook
 
----
-
-### 3. F&R File
-**Script:** `03_F_and_R_script.py`
-
-**Inputs**
+### Step 3 - F&R Workbook
+Inputs:
 - overview workbook
 - PR workbook folder
+- F&R output workbook path
 
-**Output**
+Output:
 - F&R workbook
 
----
-
-### 4. Build File
-**Script:** `04_build_file_script.py`
-
-**Inputs**
+### Step 4 - Build Workbook
+Inputs:
 - build template workbook
 - coversheet workbook folder
 - PR workbook folder
+- build output workbook path
 
-**Output**
+Output:
 - build workbook
 
----
-
-### 5. Updated J.1 File
-**Script:** `05_J1_script.py`
-
-**Inputs**
+### Step 5 - Update J.1
+Inputs:
 - build workbook
-- source J.1 workbook
+- source J.1 previous workbook
+- updated J.1 output workbook path
 
-**Output**
+Output:
 - updated J.1 workbook
 
-**Run note:** Use a true `.xlsx` or `.xlsm` source J.1 workbook for the current update flow. A `.xlsb` source file is not safely supported for the workbook update step.
+Run note:
+- The source J.1 workbook should be `.xlsx` or `.xlsm` for the current update workflow. `.xlsb` is not safely supported for updating in Step 5.
 
----
-
-### 6. Updated J.17 File
-**Script:** `06_J17_file_script.py`
-
-**Inputs**
+### Step 6 - Update J.17
+Inputs:
 - source J.17 workbook
 - updated J.1 workbook
 - billing workbook
+- updated J.17 output workbook path
 - current option period
 - billing month
 
-**Output**
+Output:
 - updated J.17 workbook
+
+## UI Layout
+The current UI includes:
+- workflow overview page
+- one page per workflow step
+- run history page
+- settings page
+- help / run guide page
+
+## State and Reuse
+The UI stores:
+- saved field values by step
+- step status
+- run history
+- latest configured outputs
+
+The UI can reuse prior outputs for downstream inputs where the workflow naturally connects.
