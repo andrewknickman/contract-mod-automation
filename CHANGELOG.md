@@ -1,140 +1,69 @@
-
-## v00.04.007
-
-### Intention
-Fix the Step 2 UI-run regression caused by the child process environment and harden UI-launched workflow steps against missing home-directory variables.
-
-### Overall Updates
-- Fixed the UI process launch so workflow steps inherit the full system environment instead of a stripped environment.
-- Added a runtime environment guard in `ui_runner.py` to ensure `HOME`, `USERPROFILE`, and `MPLCONFIGDIR` are available for libraries such as `matplotlib` when a step is launched from the UI.
-- Preserved the existing step business logic; this fix is in the UI execution wrapper only.
-
-### Per-File Updates
-- `ui_app.py`
-  - Changed the step-launch environment setup to use the full system environment before adding `PYTHONUNBUFFERED`.
-- `ui_runner.py`
-  - Added environment normalization for home-directory and Matplotlib config variables before loading and running a workflow step.
-
-## v00.04.006
-
-### Intention
-Improve workflow clarity and running feedback in the PySide6 UI.
-
-### Overall Updates
-- replaced vague prerequisites text with actual upstream dependency and required-input summaries on each step page
-- added live running feedback with an animated running indicator and an indeterminate progress bar while a step is executing
-- improved step log behavior so output updates in real time during a run
-
-### Per-File Updates
-- `ui_app.py`
-  - rewrote the prerequisites panel to show upstream step status, linked outputs, and required inputs for the current step
-  - added a running indicator, animated state text, and an indeterminate progress bar
-  - updated process launching to use unbuffered Python output for better real-time log updates
-  - updated stdout/stderr handling to stream log output into the UI while the process is still running
-
-## v00.04.005
-
-### Intention
-Improve the PySide6 UI formatting and add practical workflow quality-of-life features.
-
-### Overall Updates
-- Fixed major UI contrast issues, including white text on white backgrounds
-- Added clearer visual hierarchy and button styling for primary vs secondary actions
-- Added open/copy path actions directly in step fields
-- Added clearer validation presentation, status bar updates, and improved table readability
-- Added small usability refinements such as clearable text fields and richer tooltips
-
-### Per-File Updates
-- `ui_app.py`
-  - improved global styling and contrast
-  - added secondary/primary button roles
-  - added open/copy path actions for file and folder fields
-  - improved history table readability
-  - added status bar run/error/result messages
-  - improved field and log placeholders
-
 # Changelog
 
-## v00.04.004
+## v00.04.028 — GitHub-ready repository package
 
-### Intention
-Add a usable PySide6 workflow UI on top of the current six-step automation so the project can be run from a guided desktop interface instead of a terminal.
+### Added
 
-### Overall Updates
-- added a PySide6 desktop UI shell for the workflow
-- added step pages for all six workflow stages
-- added workflow overview, run history, settings, and help pages
-- added UI-driven input collection for files, folders, save locations, integers, and text values
-- added step status tracking, run logs, and run history persistence
-- added previous-output reuse for downstream step inputs
-- kept the current six-step business logic intact and ran it through the new UI layer
-- updated README to explain how to launch and use the UI
+- Prepared a clean repository layout for replacing the existing GitHub repository.
+- Added `.gitignore` to exclude generated workbooks, local run folders, caches, virtual environments, and local config.
+- Added `.gitattributes` for safer text normalization and binary workbook handling.
+- Moved historical audit notes, diffs, and version-specific README/CHANGELOG files under `docs/`.
 
-### Per-File Updates
-- `ui_app.py`
-  - added the main PySide6 application window
-  - added workflow navigation, step pages, overview page, run history page, settings page, and help page
-  - added validation, logging, and step execution from the UI
-- `ui_runner.py`
-  - added the runner used by the UI to execute existing workflow steps with injected UI responses
-- `ui_workflow.py`
-  - added the shared metadata for step layout, fields, dependencies, and output reuse
-- `README.md`
-  - updated setup and run guidance to include the PySide6 UI
+### Fixed
 
-## v00.04.003
+- Removed accidental leading `\` characters from dependency launcher files and `install_dependencies.py` so they run cleanly:
+  - `install_dependencies.py`
+  - `INSTALL_DEPENDENCIES.bat`
+  - `INSTALL_DEPENDENCIES.command`
+  - `VERIFY_DEPENDENCIES.bat`
 
-### Intention
-Capture the cumulative updates made from the original source package to the current working build in the project documentation.
+### Preserved
 
-### Overall Updates
-- rewrote README, CHANGELOG, and WORKFLOW to reflect the full change set from the original source to the current working build
-- clarified that the project had moved away from hardcoded machine-specific paths toward runtime file and folder selection
-- documented the current Script 05 `.xlsb` limitation for J.1 source files
+- No workflow business logic changed from v00.04.027.
+- Step 5 J.1 path-scope fix remains intact.
+- Dependency installer from v00.04.026 remains included, with launcher cleanup.
+- Build, Overview, F&R, Catalog, J.17, MFR, and controller UI logic are otherwise unchanged.
 
-## v00.04.002
+## v00.04.027 — J.1 current path scope fix
 
-### Intention
-Make the documentation clearer for setup, run flow, and current project state.
+- Fixed Step 5 J.1 generation failure caused by `j1_current_file` being referenced before assignment.
+- Preserved `.xlsb` / `.xls` conversion behavior from v00.04.025.
 
-### Overall Updates
-- improved README setup and run instructions
-- tightened WORKFLOW documentation
-- adjusted CHANGELOG wording to read more cleanly as a cumulative update record
+## v00.04.026 — Dependency installer
 
-## v00.04.001
+- Added `requirements.txt`.
+- Added dependency installer and verifier launchers.
+- Included Windows `pywin32` support for Excel-based `.xlsb` / `.xls` conversion.
 
-### Intention
-Add a setup and run guide to the project documentation.
+## v00.04.025 — J.1 XLSB conversion fix
 
-### Overall Updates
-- added setup and run instructions to README
-- documented runtime prompts and outputs for each step
+- Added real `.xlsb` / `.xls` to `.xlsx` conversion for previous J.1 workbooks before openpyxl writes to the file.
 
-## v00.04
+## v00.04.024 — Build Catalog PR concatenation fix
 
-### Intention
-Decouple the workflow from hardcoded machine-specific directories and workbook names.
+- Superseded the incorrect v00.04.023 Catalog identity change.
+- Kept Price Request Number out of the Catalog duplicate lookup key.
+- Concatenated PR numbers on collapsed duplicate Catalog items, for example `59984/59993`.
 
-### Overall Updates
-- added `workflow_io.py`
-- removed the original hardcoded `D:\...` path dependency from Scripts 01-06
-- replaced fixed input/output workbook locations with runtime file and folder selection
-- added runtime prompting for option period and billing month where applicable
-- added lean project documentation
+## v00.04.022 — Build Catalog conversion/deduplication fix
 
-### Per-File Updates
-- `01_final_coversheet_generation_script.py`
-  - replaced hardcoded J.1, CLIN, PR, and output paths with runtime selection
-- `02_overview_file_script.py`
-  - replaced hardcoded coversheet, CLIN, and output paths with runtime selection
-- `03_F_and_R_script.py`
-  - replaced hardcoded overview, PR, and output paths with runtime selection
-- `04_build_file_script.py`
-  - replaced hardcoded build template, coversheet, PR, and output paths with runtime selection
-- `05_J1_script.py`
-  - replaced hardcoded build, J.1, and output paths with runtime selection
-- `06_J17_file_script.py`
-  - replaced hardcoded J.17, J.1, billing, and output paths with runtime selection
-- `workflow_io.py`
-  - added shared file, folder, save-file, integer, and text prompts
+- Corrected Catalog deduplication order.
+- Prevented blank/unmapped pricing methods from collapsing by EIS CLIN alone.
+
+## v00.04.021 — Build pricing-factor method correction
+
+- Corrected Build pricing-factor handling for `ORIG JUR`, `TERM JUR`, `ORIG JUR-TERM JUR`, and `ORIG NSC-TERM NSC`.
+- Preserved use of PR/J.1 source fields `Orig CJID` and `Term CJID` for JUR matching.
+
+## v00.04.020 — Build OpDiv approval fallback fix
+
+- Blank OpDiv approval status is no longer treated as rejected.
+- If no explicit Yes/No decisions exist, the Build includes all valid CLIN rows as pending-review candidates.
+
+## Earlier v00.04.x changes
+
+- Added controller UI.
+- Removed hard-coded paths and filenames.
+- Added file/folder picker support.
+- Added Overview F&R handling corrections for blank, unknown, Pending, and Approved statuses.
+- Added F&R script header-variant support for Verizon/HHS comments, Source/Networx/Network fields, case descriptions, and J.1 price matching.

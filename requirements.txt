@@ -1,0 +1,12 @@
+# Mod Automation runtime dependencies
+# Install with: python -m pip install -r requirements.txt
+
+pandas>=2.0
+numpy>=1.24
+openpyxl>=3.1
+pyxlsb>=1.0
+xlrd>=2.0
+python-docx>=1.1
+
+# Required only on Windows when Step 5 needs to convert .xlsb/.xls J.1 files to .xlsx
+pywin32>=306; platform_system == "Windows"

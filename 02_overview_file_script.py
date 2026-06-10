@@ -4,18 +4,17 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from pathlib import Path
 import os
+import argparse
 from typing import Dict, List, Any, Optional
+from file_selection import (
+    choose_existing_dir, choose_optional_file, choose_save_file,
+    read_excel_auto, iter_excel_files, EXCEL_FILETYPES,
+)
 
-from workflow_io import choose_directory, choose_file, choose_save_file
 
-
-
-# ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = None
-INPUT_DIR = None
-OUTPUT_DIR = None
+# ─── Runtime-selected inputs ──────────────────────────────────────────────────
+# Assigned in main() from CLI arguments or file/folder picker dialogs.
 COVERSHEET_FILES_DIR = None
-
 clin_table_file = None
 overview_output_file = None
 
@@ -236,7 +235,7 @@ def load_clin_lookup_table(lookup_file_path: str) -> Dict[str, str]:
     Supports both .xls and .xlsx formats via pandas.
     """
     try:
-        df = pd.read_excel(lookup_file_path)
+        df = read_excel_auto(lookup_file_path)
         df.columns = df.columns.str.strip()
 
         clin_col = 'Clin' if 'Clin' in df.columns else ('CLIN' if 'CLIN' in df.columns else None)
@@ -305,9 +304,110 @@ def get_services_from_clin_tables(wb, lookup_table: Dict[str, str]) -> str:
     return ', '.join(sorted(service_ids))
 
 
+def _clean_table_value(value) -> str:
+    """Return a normalized string for CLIN table cell values."""
+    if value is None:
+        return ""
+    value_str = str(value).strip()
+    if value_str.lower() in {"nan", "none", "<na>"}:
+        return ""
+    return value_str
+
+
+def _normalise_header(value) -> str:
+    """Normalize a header so minor punctuation/spacing differences still match."""
+    return "".join(ch for ch in _clean_table_value(value).lower() if ch.isalnum())
+
+
+def _find_header(headers: Dict[str, int], *candidate_headers: str) -> Optional[int]:
+    """Find a column number from exact or normalized header candidates."""
+    for candidate in candidate_headers:
+        if candidate in headers:
+            return headers[candidate]
+
+    normalized_headers = {_normalise_header(header): col for header, col in headers.items()}
+    for candidate in candidate_headers:
+        candidate_key = _normalise_header(candidate)
+        if candidate_key in normalized_headers:
+            return normalized_headers[candidate_key]
+    return None
+
+
+def _is_yes(value) -> bool:
+    return _clean_table_value(value).lower() in {"yes", "y", "true", "1", "x", "checked", "✓"}
+
+
+def _normalise_status_value(value) -> str:
+    """Normalize status cells so common N/A variants compare consistently."""
+    value_str = _clean_table_value(value).lower()
+    compact = value_str.replace(" ", "").replace(".", "")
+    if compact in {"n/a", "na"}:
+        return "n/a"
+    if value_str in {"not applicable", "not-applicable"}:
+        return "n/a"
+    return value_str
+
+
+def _is_fr_required_status(value) -> bool:
+    """Statuses that make the PR need an F&R workbook entry.
+
+    Business rule: F&R Needed = Yes only when at least one scoped CLIN row has
+    F&R Status of Pending or Approved. N/A/NA does not trigger F&R Needed and
+    does not contribute to the numeric F&R count.
+    """
+    return _normalise_status_value(value) in {"pending", "approved"}
+
+
+def _is_fr_count_status(value) -> bool:
+    """Statuses included in the Overview numeric F&R item count."""
+    return _is_fr_required_status(value)
+
+
+
+def _fr_status_needs_review(value) -> bool:
+    """Return True for blank or unexpected F&R statuses needing manual review."""
+    normalized = _normalise_status_value(value)
+    if not normalized:
+        return True
+    return normalized not in {"pending", "approved", "n/a"}
+
+
+def _row_has_clin_item(sheet, row: int, headers: Dict[str, int], clin_col: Optional[int]) -> bool:
+    """
+    Determine whether a CLIN table row represents an actual line item.
+
+    Preferred method: count nonblank values in the CLIN column.
+    Fallback method: count rows with data in known business columns. This avoids
+    treating a blank formatted row as a CLIN item when the CLIN header is absent
+    or named unexpectedly.
+    """
+    if clin_col:
+        clin_value = _clean_table_value(sheet.cell(row=row, column=clin_col).value)
+        return bool(clin_value) and clin_value.lower() not in {"clin", "total", "totals"}
+
+    fallback_columns = []
+    for header_name in (
+        "OpDiv Approval (Yes/ No)", "OpDiv Approval",
+        "F&R Status (Pending, Approved, or N/A)", "F&R Status",
+        "MSA Mod Number", "MSA Mod",
+        "MSA Status (Pending, Awarded, or N/A)", "MSA Status",
+    ):
+        col = _find_header(headers, header_name)
+        if col and col not in fallback_columns:
+            fallback_columns.append(col)
+
+    return any(_clean_table_value(sheet.cell(row=row, column=col).value) for col in fallback_columns)
+
+
 def process_clin_table(sheet) -> Dict[str, Any]:
     """
     Process CLIN Table (Current OP) sheet.
+
+    Previous behavior counted '# of CLINs (Line items in current OP)' only from
+    rows where OpDiv Approval was marked Yes. That caused valid coversheets to
+    report zero CLINs when no approval rows were marked. This keeps the old
+    approval-based count when approvals are present, but falls back to counting
+    actual CLIN line items when no approvals are marked.
     """
     results = {
         'clin_count': 0,
@@ -322,43 +422,69 @@ def process_clin_table(sheet) -> Dict[str, Any]:
         if header:
             headers[str(header).strip()] = col
 
-    opdiv_yes_count = 0
-    fr_pending_na_found = False
-    fr_items = []
+    clin_col = _find_header(headers, 'CLIN', 'Clin', 'CLIN #', 'CLIN Number', 'CLIN No.', 'CLIN No')
+    opdiv_col = _find_header(headers, 'OpDiv Approval (Yes/ No)', 'OpDiv Approval')
+    fr_col = _find_header(headers, 'F&R Status (Pending, Approved, or N/A)', 'F&R Status')
+    msa_mod_col = _find_header(headers, 'MSA Mod Number', 'MSA Mod')
+    msa_status_col = _find_header(headers, 'MSA Status (Pending, Awarded, or N/A)', 'MSA Status')
+
+    clin_rows = []
     msa_mods = {}
 
     for row in range(2, sheet.max_row + 1):
-        opdiv_col = headers.get('OpDiv Approval (Yes/ No)', headers.get('OpDiv Approval', None))
+        has_clin_item = _row_has_clin_item(sheet, row, headers, clin_col)
+
+        opdiv_is_yes = False
         if opdiv_col:
-            opdiv_value = sheet.cell(row=row, column=opdiv_col).value
-            if opdiv_value and str(opdiv_value).strip().lower() in ['yes', 'y']:
-                opdiv_yes_count += 1
+            opdiv_is_yes = _is_yes(sheet.cell(row=row, column=opdiv_col).value)
+            if opdiv_is_yes:
                 results['opdiv_approval'] = 'Yes'
-                fr_col = headers.get('F&R Status (Pending, Approved, or N/A)', headers.get('F&R Status', None))
-                if fr_col:
-                    fr_value = sheet.cell(row=row, column=fr_col).value
-                    if fr_value and str(fr_value).strip().lower() in ['pending', 'n/a', 'na']:
-                        fr_pending_na_found = True
 
-        fr_col = headers.get('F&R Status (Pending, Approved, or N/A)', headers.get('F&R Status', None))
-        if fr_col:
-            fr_value = sheet.cell(row=row, column=fr_col).value
-            if fr_value and str(fr_value).strip().lower() in ['pending', 'approved']:
-                fr_items.append(fr_value)
+        fr_value = sheet.cell(row=row, column=fr_col).value if fr_col else None
 
-        msa_mod_col = headers.get('MSA Mod Number', headers.get('MSA Mod', None))
-        msa_status_col = headers.get('MSA Status (Pending, Awarded, or N/A)', headers.get('MSA Status', None))
-        if msa_mod_col and msa_status_col:
+        if has_clin_item:
+            clin_rows.append({
+                "row": row,
+                "opdiv_is_yes": opdiv_is_yes,
+                "fr_value": fr_value,
+            })
+
+        if has_clin_item and msa_mod_col and msa_status_col:
             msa_mod_num = sheet.cell(row=row, column=msa_mod_col).value
             msa_status = sheet.cell(row=row, column=msa_status_col).value
-            num_str = str(msa_mod_num).strip() if msa_mod_num else ''
-            status_str = str(msa_status).strip() if msa_status else ''
+            num_str = _clean_table_value(msa_mod_num)
+            status_str = _clean_table_value(msa_status)
             if num_str:
                 msa_mods[num_str] = status_str
 
-    results['clin_count'] = opdiv_yes_count
-    results['fr_needed'] = 'Yes' if fr_pending_na_found else 'No'
-    results['fr_count'] = len(fr_items)
+    approved_rows = [row for row in clin_rows if row["opdiv_is_yes"]]
+
+    # Preserve the existing approval-based scope when approval rows exist.
+    # If none are marked, use the line items actually listed in the table.
+    rows_for_counts = approved_rows if approved_rows else clin_rows
+    results['clin_count'] = len(rows_for_counts)
+
+    # Only Pending and Approved count. N/A/NA is a recognized non-F&R status.
+    # Blank or unexpected values (for example "?") are not reliable No values;
+    # when no Pending/Approved rows are found and any scoped status is blank or
+    # unknown, leave both F&R Needed and the adjacent F&R CLIN count blank so the
+    # coversheet is flagged for closer review.
+    fr_count = sum(
+        1 for row in rows_for_counts if _is_fr_count_status(row["fr_value"])
+    )
+    needs_manual_fr_review = any(
+        _fr_status_needs_review(row["fr_value"]) for row in rows_for_counts
+    )
+
+    if fr_count > 0:
+        results['fr_needed'] = 'Yes'
+        results['fr_count'] = fr_count
+    elif rows_for_counts and needs_manual_fr_review:
+        results['fr_needed'] = ''
+        results['fr_count'] = ''
+    else:
+        results['fr_needed'] = 'No'
+        results['fr_count'] = 0
 
     if msa_mods:
         msa_mod_list = []
@@ -521,7 +647,7 @@ def process_coversheet(filepath: Path, clin_lookup_table: Dict[str, str] = None,
     result['# of CLINs (Line items in current OP)'] = str(clin_data['clin_count'])
     result['OpDiv Approval'] = clin_data['opdiv_approval']
     result['F&R Needed'] = clin_data['fr_needed']
-    result['# of CLINs'] = str(clin_data['fr_count'])
+    result['# of CLINs'] = '' if clin_data['fr_needed'] == '' else str(clin_data['fr_count'])
     result['MSA Mod'] = clin_data['msa_mod']
     
     wb.close()
@@ -632,54 +758,37 @@ def create_overview(coversheet_files: List[Path], output_path: str = 'overview_o
     return df
 
 
-
-def configure_runtime():
-    global BASE_DIR, INPUT_DIR, OUTPUT_DIR, COVERSHEET_FILES_DIR
-    global clin_table_file, overview_output_file
-
-    print("Select the coversheet folder and related files for overview generation...")
-    coversheets_dir = choose_directory(
-        title="Select the coversheets folder",
-        state_key="script02_coversheets_dir",
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Create the overview workbook from selected coversheet files."
     )
-    clin_lookup_path = choose_file(
-        title="Select the CLIN lookup workbook",
-        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
-        state_key="script02_clin_lookup_file",
-    )
-    overview_path = choose_save_file(
-        title="Choose where to save the overview workbook",
-        default_name="overview_file.xlsx",
-        filetypes=[("Excel Files", "*.xlsx")],
-        state_key="script02_overview_output_file",
-    )
-
-    COVERSHEET_FILES_DIR = coversheets_dir
-    OUTPUT_DIR = overview_path.parent
-    INPUT_DIR = clin_lookup_path.parent
-    BASE_DIR = coversheets_dir.parent
-    clin_table_file = clin_lookup_path
-    overview_output_file = overview_path
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    parser.add_argument("--coversheets-dir", help="Folder containing coversheet workbooks")
+    parser.add_argument("--clin-table-file", help="Optional CLIN lookup workbook used for Services")
+    parser.add_argument("--output-file", help="Output overview workbook path")
+    return parser.parse_args(argv)
 
 
-def main():
+def configure_paths(args):
+    global COVERSHEET_FILES_DIR, clin_table_file, overview_output_file
+    COVERSHEET_FILES_DIR = choose_existing_dir(args.coversheets_dir, "Select the folder containing coversheet workbooks")
+    clin_table_file = choose_optional_file(args.clin_table_file, "Select the CLIN lookup workbook, or cancel to skip", EXCEL_FILETYPES)
+    overview_output_file = choose_save_file(args.output_file, "Save the overview workbook as", "overview_file.xlsx", EXCEL_FILETYPES)
+
+
+def main(argv=None):
     """Main function to process coversheet files."""
-    configure_runtime()
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    args = parse_args(argv)
+    configure_paths(args)
 
     if COVERSHEET_FILES_DIR.exists():
-        coversheet_files = list(COVERSHEET_FILES_DIR.glob("*.xlsx"))
-        coversheet_files = [f for f in coversheet_files
-                           if 'overview' not in f.name.lower()
-                           and not f.name.startswith("~$")]
+        coversheet_files = list(iter_excel_files(COVERSHEET_FILES_DIR, exclude_substrings=("overview",)))
 
         if coversheet_files:
-            if clin_table_file.exists():
+            if clin_table_file and clin_table_file.exists():
                 df = create_overview(coversheet_files, str(overview_output_file),
                                      str(clin_table_file))
             else:
-                print("WARNING: CLIN lookup file not found. Services will be blank.")
+                print("WARNING: No CLIN lookup file selected. Services will be blank.")
                 df = create_overview(coversheet_files, str(overview_output_file), None)
 
             print("\nProcess completed successfully!")

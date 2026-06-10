@@ -1,0 +1,16 @@
+# Normalize source and documentation text
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.command text eol=lf
+*.bat text eol=crlf
+
+# Treat Office/PDF files as binary if intentionally force-added
+*.xlsx binary
+*.xlsm binary
+*.xlsb binary
+*.xls binary
+*.docx binary
+*.docm binary
+*.pdf binary

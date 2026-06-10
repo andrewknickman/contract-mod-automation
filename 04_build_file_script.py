@@ -10,27 +10,27 @@ This script:
 import pandas as pd
 import re
 import shutil
+import argparse
 from pathlib import Path
 import warnings
 from typing import Dict, List, Optional, Tuple
-
-from workflow_io import choose_directory, choose_file, choose_save_file
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from file_selection import (
+    choose_existing_file, choose_existing_dir, choose_save_file,
+    iter_excel_files, find_excel_by_prefix, read_excel_auto, excel_file,
+    EXCEL_FILETYPES,
+)
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
 
 
-
-# ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = None
-INPUT_DIR = None
-OUTPUT_DIR = None
+# ─── Runtime-selected inputs ──────────────────────────────────────────────────
+# Assigned in main() from CLI arguments or file/folder picker dialogs.
 PR_DIR = None
 COVERSHEET_FILES_DIR = None
-
 build_file_input = None
 build_file_output = None
 
@@ -71,20 +71,9 @@ def find_matching_pr_file(pr_number: str, pr_path: Path) -> Optional[Path]:
         print(f"Error: PR directory does not exist: {pr_path}")
         return None
         
-    # Search for PR file that starts with the PR number
-    pattern = f"{pr_number}*.xlsx"
-    matching_files = list(pr_path.glob(pattern))
-    
-    if matching_files:
-        # Return the first match (there should typically be only one)
-        return matching_files[0]
-    
-    # Try case-insensitive search
-    for file in pr_path.glob("*.xlsx"):
-        if file.name.upper().startswith(pr_number.upper()):
-            return file
-            
-    return None
+    # Search for an Excel PR file that starts with the PR number.
+    # Supports .xlsx, .xlsm, .xlsb, and .xls instead of hard-coding .xlsx.
+    return find_excel_by_prefix(pr_path, pr_number)
 
 
 def convert_to_period(to_period_value) -> Optional[str]:
@@ -127,8 +116,12 @@ def load_pricing_method_mapping(build_file_path: Path) -> Dict[str, str]:
     pricing_map = {}
     
     try:
-        # Read the CLIN Table sheet
-        clin_table = pd.read_excel(build_file_path, sheet_name='CLIN Table 2024.10.04')
+        # Read the first CLIN Table-like sheet instead of a date-stamped sheet name.
+        xls = excel_file(build_file_path)
+        clin_sheet = next((sheet for sheet in xls.sheet_names if 'clin table' in sheet.lower()), None)
+        if not clin_sheet:
+            raise ValueError("No sheet containing 'CLIN Table' was found in the build workbook")
+        clin_table = pd.read_excel(xls, sheet_name=clin_sheet)
         
         # Create mapping from Clin to Pricing Method
         for _, row in clin_table.iterrows():
@@ -145,19 +138,18 @@ def load_pricing_method_mapping(build_file_path: Path) -> Dict[str, str]:
 
 def format_date_column(date_value):
     """
-    Convert date from '2026-08-31 0:00:00' format to '8/31/26' format.
+    Convert date from '2026-08-31 0:00:00' format to 'DD-MM-YYYY' format.
     
     Args:
         date_value: Date value in various formats
         
     Returns:
-        Formatted date string in M/D/YY format or original value if not a date
+        Formatted date string in DD-MM-YYYY format or original value if not a date
     """
     if pd.isna(date_value):
         return ""
     
     try:
-        # Convert to datetime if it's a string
         if isinstance(date_value, str):
             date_obj = pd.to_datetime(date_value)
         elif isinstance(date_value, pd.Timestamp):
@@ -165,9 +157,7 @@ def format_date_column(date_value):
         else:
             return date_value
         
-        # Format as M/D/YY (e.g., 8/31/26 or 9/1/25)
-        return date_obj.strftime('%-m/%-d/%y')  # For Unix/Mac
-        # For Windows, use: return date_obj.strftime('%#m/%#d/%y')
+        return date_obj.strftime('%d-%m-%Y')
         
     except:
         return date_value
@@ -195,90 +185,287 @@ def format_dataframe_dates(df: pd.DataFrame) -> pd.DataFrame:
     return df_copy
 
 
+# Coversheet schema helpers. The Build step is often run against a shared folder
+# that contains both TO Mod Coversheets and PR/J.1 workbooks. These helpers keep
+# PR workbooks from being misread as coversheets and prevent exact header-spacing
+# differences from crashing the build process.
+COVERSHEET_CURRENT_OP_SHEET_ALIASES = (
+    "CLIN Table (Current OP)",
+    "CLIN Table Current OP",
+    "CLIN Table - Current OP",
+)
+COVERSHEET_OY_SHEET_ALIASES = (
+    "CLIN Table (OY)",
+    "CLIN Table OY",
+    "CLIN Table - OY",
+)
+OPDIV_APPROVAL_COLUMN_ALIASES = (
+    "OpDiv Approval (Yes/ No)",
+    "OpDiv Approval (Yes/No)",
+    "OpDiv Approval (Yes / No)",
+    "OpDiv Approval Yes No",
+    "OpDiv Approval (Y/N)",
+    "OpDiv Approval Y/N",
+    "OpDiv Approval",
+    "OpDiv Approved",
+    "OPDIV Approval",
+)
+TO_PERIOD_COLUMN_ALIASES = (
+    "TO Period",
+    "TO Periods",
+    "Period",
+)
+
+
+def normalise_schema_label(value) -> str:
+    """Normalize workbook headers/sheet names for tolerant schema matching."""
+    if value is None or pd.isna(value):
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def find_column_by_alias(df: pd.DataFrame, aliases: Tuple[str, ...]) -> Optional[str]:
+    """Return the actual DataFrame column matching one of the accepted aliases."""
+    wanted = {normalise_schema_label(alias) for alias in aliases}
+    for column in df.columns:
+        if normalise_schema_label(column) in wanted:
+            return column
+    return None
+
+
+def find_sheet_by_alias(xls, aliases: Tuple[str, ...]) -> Optional[str]:
+    """Return the actual workbook sheet name matching one of the accepted aliases."""
+    wanted = {normalise_schema_label(alias) for alias in aliases}
+    for sheet_name in xls.sheet_names:
+        if normalise_schema_label(sheet_name) in wanted:
+            return sheet_name
+    return None
+
+
+def workbook_has_coversheet_clin_table(path: Path) -> bool:
+    """True when the workbook appears to be a TO Mod Coversheet workbook."""
+    try:
+        xls = excel_file(path)
+        return bool(
+            find_sheet_by_alias(xls, COVERSHEET_CURRENT_OP_SHEET_ALIASES)
+            or find_sheet_by_alias(xls, COVERSHEET_OY_SHEET_ALIASES)
+        )
+    except Exception as exc:
+        print(f"  Skipping unreadable Excel file {path.name}: {exc}")
+        return False
+
+
+def normalize_pricing_method(value) -> str:
+    """Normalize a CLIN Table pricing method label for pricing-factor matching."""
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip().upper()
+    text = text.replace("–", "-").replace("—", "-")
+    text = re.sub(r"\s*[-]+\s*", "-", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def normalize_pricing_factor_value(value) -> str:
+    """Normalize pricing-factor values so 120036, 120036.0, and '120036' compare alike."""
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "none", "null"}:
+        return ""
+    text = text.replace(",", "")
+    try:
+        number = float(text)
+        if number.is_integer():
+            return str(int(number))
+    except (ValueError, TypeError):
+        pass
+    return text
+
+
+def combine_pricing_factor_parts(*values) -> Optional[str]:
+    """Combine two pricing-factor values with a hyphen when both are available."""
+    normalized = [normalize_pricing_factor_value(value) for value in values]
+    if all(normalized):
+        return "-".join(normalized)
+    return None
+
+
 def get_pricing_factor_value(pr_row: pd.Series, pricing_method: str) -> Optional[str]:
     """
-    Get the appropriate pricing factor value from PR data based on pricing method.
+    Get the appropriate PR/J.1 pricing-factor value based on the CLIN Table
+    pricing method. The pricing methods are business labels; the PR/J.1 source
+    columns for JUR methods are still named Orig CJID / Term CJID.
     
-    Args:
-        pr_row: A row from the PR data
-        pricing_method: The pricing method for this CLIN
-        
-    Returns:
-        The appropriate pricing factor value or None
+    Supported pricing methods:
+    - ICB
+    - ORIG NSC
+    - TERM NSC
+    - ORIG JUR
+    - TERM JUR
+    - ORIG JUR-TERM JUR
+    - ORIG NSC-TERM NSC
     """
-    if pd.isna(pricing_method):
-        return None
-        
-    pricing_method = str(pricing_method).strip().upper()
-    
+    pricing_method = normalize_pricing_method(pricing_method)
+
     if pricing_method == 'ICB':
         return pr_row.get('Case Number')
-    elif pricing_method == 'ORIG NSC':
+    if pricing_method == 'ORIG NSC':
         return pr_row.get('Orig NSC')
-    elif pricing_method == 'ORIG CJID':
-        return pr_row.get('Orig CJID')
-    elif pricing_method == 'ORIG NSC-TERM NSC':
-        orig_nsc = pr_row.get('Orig NSC', '')
-        term_nsc = pr_row.get('Term NSC', '')
-        if pd.notna(orig_nsc) and pd.notna(term_nsc):
-            return f"{orig_nsc}-{term_nsc}"
-    elif pricing_method == 'ORIG CJID-TERM CJID':
-        orig_cjid = pr_row.get('Orig CJID', '')
-        term_cjid = pr_row.get('Term CJID', '')
-        if pd.notna(orig_cjid) and pd.notna(term_cjid):
-            return f"{orig_cjid}-{term_cjid}"
-    elif pricing_method == 'TERM NSC':
+    if pricing_method == 'TERM NSC':
         return pr_row.get('Term NSC')
-    elif pricing_method == 'TERM CJID':
+    if pricing_method == 'ORIG JUR':
+        return pr_row.get('Orig CJID')
+    if pricing_method == 'TERM JUR':
         return pr_row.get('Term CJID')
-    
+    if pricing_method == 'ORIG NSC-TERM NSC':
+        return combine_pricing_factor_parts(pr_row.get('Orig NSC'), pr_row.get('Term NSC'))
+    if pricing_method == 'ORIG JUR-TERM JUR':
+        return combine_pricing_factor_parts(pr_row.get('Orig CJID'), pr_row.get('Term CJID'))
+
     return None
 
 
 def read_coversheet_data(coversheet_file: Path) -> pd.DataFrame:
     """
-    Read and combine coversheet data from both sheets.
+    Read and combine coversheet CLIN data from available coversheet sheets.
     
     Args:
         coversheet_file: Path to the coversheet file
         
     Returns:
-        Combined DataFrame with both Current OP and OY data
+        Combined DataFrame with Current OP and/or OY rows
     """
     try:
-        # Read coversheet sheets
-        coversheet_current = pd.read_excel(coversheet_file, sheet_name='CLIN Table (Current OP)')
-        coversheet_oy = pd.read_excel(coversheet_file, sheet_name='CLIN Table (OY)')
-        
-        # Combine both coversheet sheets
-        coversheet_data = pd.concat([coversheet_current, coversheet_oy], ignore_index=True)
-        return coversheet_data
+        xls = excel_file(coversheet_file)
+        sheet_names = []
+        for aliases in (COVERSHEET_CURRENT_OP_SHEET_ALIASES, COVERSHEET_OY_SHEET_ALIASES):
+            sheet_name = find_sheet_by_alias(xls, aliases)
+            if sheet_name and sheet_name not in sheet_names:
+                sheet_names.append(sheet_name)
+
+        if not sheet_names:
+            print(
+                f"Error reading coversheet {coversheet_file.name}: no CLIN Table Current OP/OY sheet found"
+            )
+            return pd.DataFrame()
+
+        frames = []
+        for sheet_name in sheet_names:
+            frames.append(read_excel_auto(coversheet_file, sheet_name=sheet_name))
+
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     except Exception as e:
         print(f"Error reading coversheet {coversheet_file.name}: {str(e)}")
         return pd.DataFrame()
 
 
+def _normalise_approval_value(value) -> str:
+    """Normalize an OpDiv approval cell for inclusion decisions."""
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip().lower()
+    if text in {"", "nan", "none", "null"}:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _is_blank_like(value) -> bool:
+    """True when a coversheet cell should be treated as blank for row screening."""
+    if value is None or pd.isna(value):
+        return True
+    return str(value).strip().lower() in {"", "nan", "none", "null"}
+
+
+def _filter_valid_clin_rows(coversheet_data: pd.DataFrame, to_period_col: str) -> pd.DataFrame:
+    """Return rows that have enough coversheet data to attempt a PR/J.1 match."""
+    required_cols = []
+    if "CLIN" in coversheet_data.columns:
+        required_cols.append("CLIN")
+    else:
+        print("  Warning: CLIN column not found in coversheet data.")
+        return pd.DataFrame()
+
+    if to_period_col in coversheet_data.columns:
+        required_cols.append(to_period_col)
+
+    valid_mask = pd.Series(True, index=coversheet_data.index)
+    for column in required_cols:
+        valid_mask &= ~coversheet_data[column].apply(_is_blank_like)
+
+    valid_rows = coversheet_data[valid_mask].copy()
+    skipped = len(coversheet_data) - len(valid_rows)
+    if skipped:
+        print(f"  Skipped {skipped} row(s) without a usable CLIN/TO Period")
+
+    return valid_rows
+
+
 def filter_approved_items(coversheet_data: pd.DataFrame) -> pd.DataFrame:
     """
-    Filter coversheet data for approved items only.
+    Select coversheet rows for Build processing.
+
+    Business rule:
+    - If the coversheet contains explicit OpDiv decisions, include only rows marked Yes.
+    - If the coversheet has no explicit Yes/No decisions, include all valid CLIN rows
+      as pending-review build candidates. Blank/unknown approval status is not treated
+      as rejected unless the coversheet also contains explicit Yes/No decisions.
     
     Args:
         coversheet_data: Combined coversheet DataFrame
         
     Returns:
-        DataFrame containing only approved items
+        DataFrame containing rows eligible for Build matching
     """
     if coversheet_data.empty:
         return pd.DataFrame()
+
+    to_period_col = find_column_by_alias(coversheet_data, TO_PERIOD_COLUMN_ALIASES)
+    if not to_period_col:
+        print("  Warning: TO Period column not found in coversheet data.")
+        return pd.DataFrame()
+
+    valid_rows = _filter_valid_clin_rows(coversheet_data, to_period_col)
+    if valid_rows.empty:
+        return pd.DataFrame()
+
+    approval_col = find_column_by_alias(valid_rows, OPDIV_APPROVAL_COLUMN_ALIASES)
+    if not approval_col:
+        print(
+            "  Warning: OpDiv approval column not found. "
+            "Including all valid CLIN rows as pending-review build candidates."
+        )
+        included_items = valid_rows.copy()
+    else:
+        normalized_approvals = valid_rows[approval_col].apply(_normalise_approval_value)
+        explicit_decision_mask = normalized_approvals.isin({"yes", "y", "no", "n"})
+
+        if explicit_decision_mask.any():
+            yes_mask = normalized_approvals.isin({"yes", "y"})
+            included_items = valid_rows[yes_mask].copy()
+            print(
+                f"  OpDiv approval decisions found: including {len(included_items)} Yes row(s) "
+                f"and excluding {len(valid_rows) - len(included_items)} non-Yes row(s)."
+            )
+        else:
+            unknown_count = sum(1 for value in normalized_approvals if value)
+            if unknown_count:
+                print(
+                    f"  Warning: OpDiv approval column has {unknown_count} nonblank value(s) "
+                    "but no explicit Yes/No decisions. Including all valid CLIN rows as pending-review build candidates."
+                )
+            else:
+                print(
+                    "  No explicit OpDiv Yes/No decisions found. "
+                    "Including all valid CLIN rows as pending-review build candidates."
+                )
+            included_items = valid_rows.copy()
     
-    approved_items = coversheet_data[
-        coversheet_data['OpDiv Approval (Yes/ No)'].astype(str).str.strip().str.upper() == 'YES'
-    ].copy()
+    # Add converted TO Period for matching. Keep the canonical helper column name
+    # so downstream matching logic remains unchanged.
+    included_items['TO_Period_Match'] = included_items[to_period_col].apply(convert_to_period)
     
-    # Add converted TO Period for matching
-    approved_items['TO_Period_Match'] = approved_items['TO Period'].apply(convert_to_period)
-    
-    return approved_items
+    return included_items
 
 
 def read_pr_data(pr_file: Path) -> pd.DataFrame:
@@ -292,7 +479,7 @@ def read_pr_data(pr_file: Path) -> pd.DataFrame:
         DataFrame with PR J1 data
     """
     try:
-        return pd.read_excel(pr_file, sheet_name='J1')
+        return read_excel_auto(pr_file, sheet_name='J1')
     except Exception as e:
         print(f"Error reading PR file {pr_file.name}: {str(e)}")
         return pd.DataFrame()
@@ -347,13 +534,13 @@ def match_coversheet_to_pr_with_pricing(approved_items: pd.DataFrame,
                 # Create a mask for pricing factor matching
                 pr_data_copy = pr_data.copy()
                 pr_data_copy['Pricing_Factor_Match'] = pr_data_copy.apply(
-                    lambda row: get_pricing_factor_value(row, pricing_method), axis=1
+                    lambda row: normalize_pricing_factor_value(get_pricing_factor_value(row, pricing_method)), axis=1
                 )
                 
                 # Add pricing factor condition
                 pricing_conditions = (
                     base_conditions & 
-                    (pr_data_copy['Pricing_Factor_Match'] == str(pricing_factor_coversheet).strip())
+                    (pr_data_copy['Pricing_Factor_Match'] == normalize_pricing_factor_value(pricing_factor_coversheet))
                 )
                 
                 pr_matches = pr_data[pricing_conditions]
@@ -381,12 +568,12 @@ def match_coversheet_to_pr_with_pricing(approved_items: pd.DataFrame,
                 if pd.notna(pricing_factor_coversheet):
                     pr_data_copy = pr_data.copy()
                     pr_data_copy['Pricing_Factor_Match'] = pr_data_copy.apply(
-                        lambda row: get_pricing_factor_value(row, pricing_method), axis=1
+                        lambda row: normalize_pricing_factor_value(get_pricing_factor_value(row, pricing_method)), axis=1
                     )
                     
                     pricing_conditions = (
                         base_conditions_no_price & 
-                        (pr_data_copy['Pricing_Factor_Match'] == str(pricing_factor_coversheet).strip())
+                        (pr_data_copy['Pricing_Factor_Match'] == normalize_pricing_factor_value(pricing_factor_coversheet))
                     )
                     
                     pr_matches = pr_data[pricing_conditions]
@@ -440,11 +627,12 @@ def process_single_coversheet(coversheet_file: Path, pr_path: Path, pricing_map:
     # Read coversheet data
     coversheet_data = read_coversheet_data(coversheet_file)
     
-    # Filter for approved items
+    # Select rows eligible for build matching. If no explicit OpDiv decisions exist,
+    # blank approval status is treated as pending review and all valid CLIN rows are included.
     approved_items = filter_approved_items(coversheet_data)
     
     if approved_items.empty:
-        print(f"  No approved items found in {coversheet_file.name}")
+        print(f"  No build-eligible items found in {coversheet_file.name}")
         return pd.DataFrame()
     
     # Read PR data
@@ -470,8 +658,12 @@ def get_coversheet_files(coversheet_path: Path) -> List[Path]:
         print(f"Error: Coversheet directory does not exist: {coversheet_path}")
         return []
     
-    coversheet_files = list(coversheet_path.glob("*.xlsx"))
+    excel_files = list(iter_excel_files(coversheet_path))
+    coversheet_files = [path for path in excel_files if workbook_has_coversheet_clin_table(path)]
+    skipped = len(excel_files) - len(coversheet_files)
     print(f"\nFound {len(coversheet_files)} coversheet files to process")
+    if skipped:
+        print(f"Skipped {skipped} non-coversheet Excel files in the selected coversheet folder")
     return coversheet_files
 
 
@@ -702,7 +894,7 @@ def get_clin_pricing_method_mapping(build_file_path: Path):
             return {}
         
         # Read as DataFrame
-        clin_df = pd.read_excel(build_file_path, sheet_name=clin_sheet_name)
+        clin_df = read_excel_auto(build_file_path, sheet_name=clin_sheet_name)
         clin_df.columns = clin_df.columns.str.strip()
         
         # Create mapping: Clin -> Pricing Method
@@ -746,7 +938,7 @@ def get_device_class_discount_mapping(build_file_path: Path):
             return {}
         
         # Read as DataFrame
-        device_df = pd.read_excel(build_file_path, sheet_name=device_sheet_name)
+        device_df = read_excel_auto(build_file_path, sheet_name=device_sheet_name)
         device_df.columns = device_df.columns.str.strip()
         
         # Create mapping: Device Class ID -> HHS Percentage Discount from OLP
@@ -847,7 +1039,7 @@ def get_clin_wdm_mappings(build_file_path: Path):
             return {}, {}
         
         # Read as DataFrame
-        clin_df = pd.read_excel(build_file_path, sheet_name=clin_sheet_name)
+        clin_df = read_excel_auto(build_file_path, sheet_name=clin_sheet_name)
         clin_df.columns = clin_df.columns.str.strip()
         
         icb_mapping = {}
@@ -924,9 +1116,9 @@ def apply_pricing_method_cleanup(catalog_df):
         'ICB': ['Orig NSC', 'Term NSC', 'Orig CJID', 'Term CJID'],
         'NONE': ['Orig NSC', 'Term NSC', 'Orig CJID', 'Term CJID', 'Case Number', 'Verizon Case Description', 'SRE Pricing Element'],
         'ORIG JUR': ['Orig NSC', 'Term NSC', 'Term CJID', 'Case Number', 'Verizon Case Description', 'SRE Pricing Element'],
-        'ORIG JUR - TERM JUR': ['Orig NSC', 'Term NSC', 'Case Number', 'Verizon Case Description', 'SRE Pricing Element'],
+        'ORIG JUR-TERM JUR': ['Orig NSC', 'Term NSC', 'Case Number', 'Verizon Case Description', 'SRE Pricing Element'],
         'ORIG NSC': ['Term NSC', 'Orig CJID', 'Term CJID', 'Case Number', 'Verizon Case Description', 'SRE Pricing Element'],
-        'ORIG NSC - TERM NSC': ['Orig CJID', 'Term CJID', 'Case Number', 'Verizon Case Description', 'SRE Pricing Element'],
+        'ORIG NSC-TERM NSC': ['Orig CJID', 'Term CJID', 'Case Number', 'Verizon Case Description', 'SRE Pricing Element'],
         'TERM JUR': ['Orig NSC', 'Term NSC', 'Orig CJID', 'Case Number', 'Verizon Case Description', 'SRE Pricing Element']
     }
     
@@ -935,7 +1127,7 @@ def apply_pricing_method_cleanup(catalog_df):
     # Apply cleanup rules based on YY_Price_Method
     for pricing_method, columns_to_clear in cleanup_rules.items():
         # Find rows with this pricing method
-        mask = catalog_df['YY_Price_Method'].astype(str).str.strip() == pricing_method
+        mask = catalog_df['YY_Price_Method'].apply(normalize_pricing_method) == pricing_method
         rows_affected = mask.sum()
         
         if rows_affected > 0:
@@ -986,10 +1178,10 @@ def deduplicate_catalog(catalog_df):
     pricing_method_lookup_map = {
         'ICB': ['EIS CLIN', 'Case Number', 'SRE Pricing Element','TO Period'],
         'ORIG NSC': ['EIS CLIN', 'Orig NSC', 'SRE Pricing Element','TO Period'],
-        'ORIG NSC - TERM NSC': ['EIS CLIN', 'Orig NSC', 'Term NSC', 'SRE Pricing Element','TO Period'],
+        'ORIG NSC-TERM NSC': ['EIS CLIN', 'Orig NSC', 'Term NSC', 'SRE Pricing Element','TO Period'],
         'TERM NSC': ['EIS CLIN', 'Term NSC', 'SRE Pricing Element','TO Period'],
         'ORIG JUR': ['EIS CLIN', 'Orig CJID', 'SRE Pricing Element','TO Period'],
-        'ORIG JUR - TERM JUR': ['EIS CLIN', 'Orig CJID', 'Term CJID', 'SRE Pricing Element','TO Period'],
+        'ORIG JUR-TERM JUR': ['EIS CLIN', 'Orig CJID', 'Term CJID', 'SRE Pricing Element','TO Period'],
         'TERM JUR': ['EIS CLIN', 'Term CJID', 'SRE Pricing Element','TO Period'],
     }
     
@@ -998,15 +1190,36 @@ def deduplicate_catalog(catalog_df):
         """
         Create lookup value by concatenating relevant columns based on pricing method.
         """
-        pricing_method = str(row['YY_Price_Method']).strip()
+        pricing_method = normalize_pricing_method(row['YY_Price_Method'])
         
-        # Get the columns to concatenate for this pricing method
-        columns_to_use = pricing_method_lookup_map.get(pricing_method, ['EIS CLIN'])
+        # Get the columns to concatenate for this pricing method.
+        # For recognized pricing methods, use the business-specific lookup key.
+        # For blank/unknown methods, use a conservative full-row identity so
+        # manual-review rows stay visible, but do not include Price Request Number
+        # in the key. Duplicate Catalog items across PRs should collapse into one
+        # row with the PR numbers concatenated.
+        columns_to_use = pricing_method_lookup_map.get(pricing_method)
+        if not columns_to_use:
+            columns_to_use = [
+                'EIS CLIN',
+                'EIS CLIN Name',
+                'Orig NSC',
+                'Term NSC',
+                'Orig CJID',
+                'Term CJID',
+                'Case Number',
+                'SRE Pricing Element',
+                'TO Period',
+                'HHS Price',
+            ]
         
         # Concatenate values with "/" separator, converting to string and stripping whitespace
         lookup_parts = []
         for col in columns_to_use:
-            value = str(row[col]).strip() if pd.notna(row[col]) and row[col] != "" else ""
+            if col in row.index:
+                value = str(row[col]).strip() if pd.notna(row[col]) and row[col] != "" else ""
+            else:
+                value = ""
             lookup_parts.append(value)
         
         return "/".join(lookup_parts)
@@ -1130,7 +1343,7 @@ def create_catalog_sheet(build_file_path: Path):
     print(f"Found J.1 sheet: {j1_sheet_name}")
     
     # Read J.1 sheet as DataFrame
-    j1_df = pd.read_excel(build_file_path, sheet_name=j1_sheet_name)
+    j1_df = read_excel_auto(build_file_path, sheet_name=j1_sheet_name)
     j1_df.columns = j1_df.columns.str.strip()
     
     print(f"J.1 sheet has {len(j1_df)} rows")
@@ -1262,10 +1475,13 @@ def create_catalog_sheet(build_file_path: Path):
         successful_nsp = (catalog_df['wdm NSP'] != "").sum()
         print(f"Populated wdm NSP for {successful_nsp}/{len(catalog_df)} rows")
 
-    catalog_df = apply_pricing_method_cleanup(catalog_df)
-
-    # Apply deduplication logic
+    # Apply deduplication before display cleanup so lookup keys are built
+    # from the full J.1-derived values, not from fields that cleanup may blank
+    # for Catalog presentation.
     catalog_df = deduplicate_catalog(catalog_df)
+
+    # Apply Catalog display cleanup after deduplication.
+    catalog_df = apply_pricing_method_cleanup(catalog_df)
     
     # ============================================================
     # Write Catalog sheet back to the same file
@@ -1325,48 +1541,32 @@ def create_catalog_sheet(build_file_path: Path):
 # MAIN EXECUTION
 # ============================================================
 
-
-def configure_runtime():
-    global BASE_DIR, INPUT_DIR, OUTPUT_DIR, PR_DIR, COVERSHEET_FILES_DIR
-    global build_file_input, build_file_output
-
-    print("Select the template, folders, and output file for the Build process...")
-    build_template_path = choose_file(
-        title="Select the source Build workbook template",
-        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
-        state_key="script04_build_template_file",
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Create the build workbook from selected build template, coversheets, and PR files."
     )
-    coversheets_dir = choose_directory(
-        title="Select the coversheets folder",
-        state_key="script04_coversheets_dir",
-    )
-    pr_dir_path = choose_directory(
-        title="Select the folder that contains the PR files",
-        state_key="script04_pr_dir",
-    )
-    build_output_path = choose_save_file(
-        title="Choose where to save the generated Build workbook",
-        default_name="build_file.xlsx",
-        filetypes=[("Excel Files", "*.xlsx")],
-        state_key="script04_build_output_file",
-    )
-
-    build_file_input = build_template_path
-    build_file_output = build_output_path
-    COVERSHEET_FILES_DIR = coversheets_dir
-    PR_DIR = pr_dir_path
-    OUTPUT_DIR = build_output_path.parent
-    INPUT_DIR = build_template_path.parent
-    BASE_DIR = pr_dir_path.parent
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    parser.add_argument("--build-file", help="Build template/source workbook to copy and update")
+    parser.add_argument("--coversheets-dir", help="Folder containing approved coversheet workbooks")
+    parser.add_argument("--pr-dir", help="Folder containing PR workbooks")
+    parser.add_argument("--output-file", help="Output build workbook path")
+    return parser.parse_args(argv)
 
 
-def main():
+def configure_paths(args):
+    global build_file_input, build_file_output, PR_DIR, COVERSHEET_FILES_DIR
+    build_file_input = choose_existing_file(args.build_file, "Select the build template/source workbook", EXCEL_FILETYPES)
+    COVERSHEET_FILES_DIR = choose_existing_dir(args.coversheets_dir, "Select the folder containing approved coversheets")
+    PR_DIR = choose_existing_dir(args.pr_dir, "Select the folder containing PR workbooks")
+    build_file_output = choose_save_file(args.output_file, "Save the generated build workbook as", "build_file.xlsx", EXCEL_FILETYPES)
+
+
+def main(argv=None):
     """Main function to run both J.1 and Catalog automation."""
-    configure_runtime()
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    args = parse_args(argv)
+    configure_paths(args)
+    build_file_output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Copy the pristine build file from input/ to output/ before modifying
+    # Copy the selected pristine build file to the selected output path before modifying.
     if not build_file_input.exists():
         print(f"Error: Build file not found at {build_file_input}")
         return {'j1_rows': 0, 'catalog_rows': 0, 'success': False}

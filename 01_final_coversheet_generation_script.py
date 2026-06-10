@@ -2,28 +2,28 @@ import pandas as pd
 import numpy as np
 import os
 import re
+import argparse
 from pathlib import Path
 from collections import Counter
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
+from file_selection import (
+    choose_existing_file, choose_existing_dir, choose_output_dir,
+    read_excel_auto, iter_excel_files, EXCEL_FILETYPES,
+)
 
-from workflow_io import ask_integer, choose_directory, choose_file
 
-
-
-# ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = None
-INPUT_DIR = None
+# ─── Runtime-selected inputs ──────────────────────────────────────────────────
+# These are assigned in main() from CLI arguments or file/folder picker dialogs.
 PR_DIR = None
 OUTPUT_COVERSHEETS_DIR = None
-
 j1_previous_file = None
 clin_table_file = None
 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-CURRENT_OP = 5  # Current option period (change this when the period rolls over)
+CURRENT_OP = 5  # Override with --current-op when the period changes.
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 COVERSHEET_HEADERS = [
@@ -113,15 +113,15 @@ def load_j1_data():
     """Load and combine data from the two J1 catalog sheets."""
     sheet_2b = f"2B_Opt Pd {CURRENT_OP} Catalog"
     sheet_2c = f"2C_Opt Pd {CURRENT_OP + 1}-11 Catalog"
-    j1_2b = pd.read_excel(j1_previous_file, sheet_name=sheet_2b)
-    j1_2c = pd.read_excel(j1_previous_file, sheet_name=sheet_2c)
+    j1_2b = read_excel_auto(j1_previous_file, sheet_name=sheet_2b)
+    j1_2c = read_excel_auto(j1_previous_file, sheet_name=sheet_2c)
     print(f"  J1 sheets: '{sheet_2b}' + '{sheet_2c}'")
     return pd.concat([j1_2b, j1_2c], ignore_index=True)
 
 
 def load_clin_lookup():
     """Return dict  { EIS_CLIN_str : Pricing_Method_str }."""
-    clin_df = pd.read_excel(clin_table_file)
+    clin_df = read_excel_auto(clin_table_file)
     lookup = {}
     for _, row in clin_df.iterrows():
         clin_val = str(row["Clin"]).strip()
@@ -151,13 +151,8 @@ def build_j1_lookup(j1_data, clin_lookup):
 # ─── PR file helpers ──────────────────────────────────────────────────────────
 
 def get_pr_files():
-    """Return sorted list of PR .xlsx filenames (excluding coversheets)."""
-    return sorted(
-        f for f in os.listdir(PR_DIR)
-        if f.lower().endswith(".xlsx")
-        and "_coversheet" not in f.lower()
-        and not f.startswith("~$")
-    )
+    """Return sorted PR Excel filenames, excluding generated coversheets/temp files."""
+    return [p.name for p in iter_excel_files(Path(PR_DIR), exclude_substrings=("_coversheet", "coversheet"))]
 
 
 def extract_pr_number(filename):
@@ -288,7 +283,7 @@ def compute_qty_and_deduplicate(rows):
 
 def process_pr_file(pr_filepath, j1_lookup, clin_lookup):
     """Return (current_op_rows, oy_rows) for one PR file."""
-    pr_data = pd.read_excel(pr_filepath)
+    pr_data = read_excel_auto(pr_filepath)
 
     current_op_rows = []
     oy_rows = []
@@ -408,49 +403,30 @@ def create_coversheet(output_path, current_op_rows, oy_rows):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
-
-def configure_runtime():
-    global BASE_DIR, INPUT_DIR, PR_DIR, OUTPUT_COVERSHEETS_DIR
-    global j1_previous_file, clin_table_file, CURRENT_OP
-
-    print("Select the source files and folders for coversheet generation...")
-    j1_previous_path = choose_file(
-        title="Select the J1 previous workbook",
-        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
-        state_key="script01_j1_previous_file",
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Generate coversheets from selected J.1, CLIN lookup, and PR files."
     )
-    clin_lookup_path = choose_file(
-        title="Select the CLIN lookup workbook",
-        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
-        state_key="script01_clin_lookup_file",
-    )
-    pr_dir_path = choose_directory(
-        title="Select the folder that contains the PR files",
-        state_key="script01_pr_directory",
-    )
-    output_dir_path = choose_directory(
-        title="Select the output folder for generated coversheets",
-        state_key="script01_output_coversheets_dir",
-    )
-    CURRENT_OP = ask_integer(
-        title="Current Option Period",
-        prompt="Enter the current option period used for the J1 catalog sheets.",
-        default=CURRENT_OP,
-    )
-
-    BASE_DIR = str(pr_dir_path.parent)
-    INPUT_DIR = str(j1_previous_path.parent)
-    PR_DIR = str(pr_dir_path)
-    OUTPUT_COVERSHEETS_DIR = str(output_dir_path)
-    j1_previous_file = str(j1_previous_path)
-    clin_table_file = str(clin_lookup_path)
-
-    Path(OUTPUT_COVERSHEETS_DIR).mkdir(parents=True, exist_ok=True)
+    parser.add_argument("--j1-previous-file", help="Path to the J.1 previous workbook")
+    parser.add_argument("--clin-table-file", help="Path to the CLIN lookup workbook")
+    parser.add_argument("--pr-dir", help="Folder containing PR workbooks")
+    parser.add_argument("--output-dir", help="Folder where generated coversheets should be saved")
+    parser.add_argument("--current-op", type=int, default=CURRENT_OP, help="Current option period")
+    return parser.parse_args(argv)
 
 
-def main():
-    configure_runtime()
-    os.makedirs(OUTPUT_COVERSHEETS_DIR, exist_ok=True)
+def configure_paths(args):
+    global PR_DIR, OUTPUT_COVERSHEETS_DIR, j1_previous_file, clin_table_file, CURRENT_OP
+    CURRENT_OP = args.current_op
+    j1_previous_file = choose_existing_file(args.j1_previous_file, "Select the J.1 previous workbook", EXCEL_FILETYPES)
+    clin_table_file = choose_existing_file(args.clin_table_file, "Select the CLIN lookup workbook", EXCEL_FILETYPES)
+    PR_DIR = choose_existing_dir(args.pr_dir, "Select the folder containing PR workbooks")
+    OUTPUT_COVERSHEETS_DIR = choose_output_dir(args.output_dir, "Select/create the folder for generated coversheets")
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    configure_paths(args)
 
     print("Loading J1 data ...")
     j1_data = load_j1_data()
@@ -469,7 +445,7 @@ def main():
 
     for pr_file in pr_files:
         print(f"Processing: {pr_file}")
-        pr_path = os.path.join(PR_DIR, pr_file)
+        pr_path = Path(PR_DIR) / pr_file
         pr_number = extract_pr_number(pr_file)
 
         if not pr_number:
@@ -484,9 +460,7 @@ def main():
             print("  Both sheets empty -- no coversheet needed\n")
             continue
 
-        coversheet_path = os.path.join(
-            OUTPUT_COVERSHEETS_DIR, f"{pr_number}_coversheet.xlsx"
-        )
+        coversheet_path = Path(OUTPUT_COVERSHEETS_DIR) / f"{pr_number}_coversheet.xlsx"
         create_coversheet(coversheet_path, current_op_rows, oy_rows)
         print(
             f"  Current OP: {len(current_op_rows)} row(s) | "

@@ -1,0 +1,794 @@
+diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/03_F_and_R_script.py /mnt/data/work_v018/mod-automation-main/03_F_and_R_script.py
+--- /mnt/data/v017_baseline_for018/mod-automation-main/03_F_and_R_script.py	2026-06-10 02:40:28.000000000 +0000
++++ /mnt/data/work_v018/mod-automation-main/03_F_and_R_script.py	2026-06-10 02:53:55.269604377 +0000
+@@ -66,6 +66,47 @@
+     return [col for col in df.columns if _is_comment_header(col)]
+ 
+ 
++def _is_source_or_networx_header(header):
++    """Return True for accepted Source/Networx/Network information headers.
++
++    This intentionally matches header labels, not cell values. It accepts the
++    canonical project wording plus common variants such as "Source Information",
++    "Networx Information", "Network Information", and shortened "Info" forms.
++    """
++    h = _normalise_header_name(header)
++    if not h:
++        return False
++
++    direct_aliases = {
++        _normalise_header_name(alias)
++        for alias in (
++            "Source or Networx Information",
++            "Source or Network Information",
++            "Source Information",
++            "Networx Information",
++            "Network Information",
++            "Source or Networx Info",
++            "Source or Network Info",
++            "Source Info",
++            "Networx Info",
++            "Network Info",
++        )
++    }
++    if h in direct_aliases:
++        return True
++
++    has_info_word = "information" in h or h.endswith("info") or "info" in h
++    has_source_word = "source" in h
++    has_network_word = "networx" in h or "network" in h
++
++    return has_info_word and (has_source_word or has_network_word)
++
++
++def _source_or_networx_columns(df):
++    """Find COMP-sheet columns that should feed Source or Networx Information."""
++    return [col for col in df.columns if _is_source_or_networx_header(col)]
++
++
+ def _find_column_by_alias(df, aliases):
+     """Return the first DataFrame column matching any normalized alias."""
+     normalized_to_column = {_normalise_header_name(col): col for col in df.columns}
+@@ -285,18 +326,13 @@
+     if not comment_cols:
+         print("  No Verizon/HHS response/comment column variant found on COMP sheet")
+ 
++    source_cols = _source_or_networx_columns(comps_df)
++    if not source_cols:
++        print("  No Source/Networx/Network information column variant found on COMP sheet")
++
+     for i in range(num_rows):
+         verizon_response = _combined_row_text(comps_df, i, comment_cols)
+-        source_info = _get_row_value_by_alias(
+-            comps_df, i,
+-            [
+-                "Source or Networx Information",
+-                "Source or Network Information",
+-                "Source Information",
+-                "Networx Information",
+-                "Network Information",
+-            ],
+-        )
++        source_info = _combined_row_text(comps_df, i, source_cols)
+         case_number = _get_row_value_by_alias(comps_df, i, ["Case Number", "Case #", "Case No"])
+         verizon_case_desc = _get_row_value_by_alias(
+             comps_df, i,
+diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/CHANGELOG.md /mnt/data/work_v018/mod-automation-main/CHANGELOG.md
+--- /mnt/data/v017_baseline_for018/mod-automation-main/CHANGELOG.md	2026-06-10 02:28:34.000000000 +0000
++++ /mnt/data/work_v018/mod-automation-main/CHANGELOG.md	2026-06-10 02:54:37.199224874 +0000
+@@ -335,3 +335,18 @@
+ ## Earlier versions
+ 
+ Earlier package history was not included in this ZIP. This changelog starts with the path and filename flexibility refactor.
++
++## v00.04.018 — F&R source-header generalization
++
++### Fixed
++
++- Generalized COMP-sheet source-header detection for the generated `Source or Networx Information` field.
++- Accepted broader variants such as `Source Information`, `Networx Information`, `Network Information`, and shortened `Info` variants.
++- Combined unique nonblank values when multiple source/network/networx information columns exist.
++
++### Preserved
++
++- J.1 headers remain Row 1 only.
++- J.1 price matching remains based on normalized case number, pricing element, option period, and description fallback when the COMP pricing element is blank.
++- No PR-specific case numbers or source cell values were hard-coded.
++
+diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/CHANGELOG_v00.04.018.md /mnt/data/work_v018/mod-automation-main/CHANGELOG_v00.04.018.md
+--- /mnt/data/v017_baseline_for018/mod-automation-main/CHANGELOG_v00.04.018.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v018/mod-automation-main/CHANGELOG_v00.04.018.md	2026-06-10 02:54:35.398087876 +0000
+@@ -0,0 +1,27 @@
++# Changelog — v00.04.018
++
++## Fixed
++
++### F&R workbook source-information field
++
++- Generalized COMP-sheet source-header detection for the generated `Source or Networx Information` output column.
++- Accepted broader header variants, including:
++  - `Source Information`
++  - `Networx Information`
++  - `Network Information`
++  - `Source or Networx Information`
++  - `Source or Network Information`
++  - shortened `Info` variants of the above.
++- Combined unique nonblank values when more than one matching source/network/networx information column exists.
++
++## Preserved
++
++- J.1 headers are still read from Row 1 only.
++- J.1 price matching still uses normalized case number, pricing element, option period, and case-description fallback when the COMP pricing element is blank.
++- No PR-specific case numbers, source cell values, or vendor-quote text were added as hard-coded exceptions.
++- Overview logic from `v00.04.015` remains unchanged.
++
++## Validation
++
++- Confirmed `03_F_and_R_script.py` compiles.
++- Ran targeted header-detection tests for accepted and rejected source/header variants.
+diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/F_R_SCRIPT_J1_SOURCE_AUDIT_v00.04.017.md /mnt/data/work_v018/mod-automation-main/F_R_SCRIPT_J1_SOURCE_AUDIT_v00.04.017.md
+--- /mnt/data/v017_baseline_for018/mod-automation-main/F_R_SCRIPT_J1_SOURCE_AUDIT_v00.04.017.md	2026-06-10 02:41:17.000000000 +0000
++++ /mnt/data/work_v018/mod-automation-main/F_R_SCRIPT_J1_SOURCE_AUDIT_v00.04.017.md	2026-06-10 02:55:03.407542862 +0000
+@@ -1,61 +1,80 @@
+-# F&R Script J.1 / Source Field Audit — v00.04.017
++# v00.04.017 F&R Script J.1 / Source Audit
+ 
+-## Issue
+-The F&R workbook generation still had two remaining extraction/matching problems:
++## Issues addressed in v00.04.017
+ 
+-1. COMP-sheet source details were only pulled from the exact header `Source or Networx Information`.
+-   - Sample PR60413 uses `Source or Network Information`, which caused the generated output to leave `Source or Networx Information` blank.
++1. **COMP source/header variants were too narrow**
++   - Some COMP sheets use `Source or Network Information` instead of the canonical generated output header `Source or Networx Information`.
++   - The script needed to accept the observed header variant while still writing the canonical output field.
+ 
+-2. J.1 price matching still failed or selected the wrong price for some PR rows.
+-   - Sample PR59984 uses `Element Number ` on the COMP sheet instead of `SRE Pricing Element`.
+-   - Because that column was not recognized, pricing elements like `01`, `04`, and `05` were not passed into the J.1 lookup.
+-   - For rows where the COMP element number is genuinely blank, PR59984 shows multiple J.1 rows with the same case number and blank `SRE Pricing Element` for the same option period. The prior script selected the first match, which could return the NRC price when the COMP row described the MRC line.
++2. **COMP pricing-element headers were too narrow**
++   - Some COMP sheets use `Element Number` instead of `SRE Pricing Element`.
++   - The script needed to read the pricing element from accepted header variants before attempting J.1 price lookup.
++
++3. **Blank COMP pricing element needed a safer tie-breaker**
++   - Some COMP rows have a blank pricing element while multiple J.1 rows share the same case number and option period.
++   - In those cases, selecting the first matching row can return the wrong J.1 rate.
++   - The script now uses the COMP case description as a fallback tie-breaker against J.1 `ICB Case Description` when the COMP pricing element is blank.
++
++## Scope preserved
+ 
+-## Constraints preserved
+ - J.1 headers are still expected on Row 1 only.
+-- Required J.1 Row 1 headers remain:
+-  - `Case Number`
+-  - `SRE Pricing Element`
+-  - `TO Period`
+-  - `HHS Price`
+-- The script does not search for J.1 headers elsewhere in the PR workbook.
+-
+-## Fixes made
+-
+-### COMP header variants
+-The script now reads canonical output fields from accepted COMP header variants:
+-
+-- `Source or Networx Information`
+-  - accepts `Source or Networx Information`
+-  - accepts `Source or Network Information`
+-  - accepts related source/network/networx variants
++- No Row 1 header search expansion was added.
++- No PR-specific case numbers were intended to be coded as exceptions.
++- No source cell values were intended to be coded as exceptions.
++
++## Field behavior after v00.04.017
++
++### Comment field
++
++The generated output field remains:
++
++`Verizon's Response/HHS Comment`
++
++The script accepts multiple source headers such as Verizon response and HHS comment variants, including common punctuation and spelling differences.
++
++### Source field
++
++The generated output field remains:
++
++`Source or Networx Information`
++
++v00.04.017 accepted the observed `Source or Network Information` header variant. v00.04.018 supersedes this with broader source/network/networx header detection.
++
++### Case description field
++
++The generated output field remains:
++
++`Verizon Case Description`
++
++The script accepts source headers such as:
+ 
+ - `Verizon Case Description`
+-  - accepts `Verizon Case Description`
+-  - accepts `Case Description`
+-  - accepts `ICB Case Description`
++- `Case Description`
++- `ICB Case Description`
++- `Description`
++
++### Pricing element field
++
++The generated output field remains:
++
++`Pricing Element`
+ 
++The script accepts source headers such as:
++
++- `SRE Pricing Element`
+ - `Pricing Element`
+-  - accepts `SRE Pricing Element`
+-  - accepts `Pricing Element`
+-  - accepts `Element Number`
+-  - accepts `Element #`, `Element No`, and `Element`
+-
+-- `Comp Rate`
+-  - accepts `Comp Rate`, `Comparison Rate`, and `Comparable Rate`
+-
+-### J.1 price matching
+-The script still reads J.1 headers from Row 1. Matching was improved as follows:
+-
+-1. Match on `Case Number` and current `TO Period`.
+-2. If COMP has a pricing element, also match on `SRE Pricing Element`.
+-3. If COMP has a blank pricing element and multiple J.1 rows share the same case/period, use the COMP case description as a tie-breaker against J.1 `ICB Case Description`.
+-4. If the match is still ambiguous and candidate prices differ, leave `J.1 Rate` blank instead of selecting an unsafe first row.
+-
+-## Sample validation
+-Using the attached sample PRs:
+-
+-- PR60413 now pulls `Source or Network Information` into generated `Source or Networx Information` as `See Vendor Quote Below`.
+-- PR60413 now pulls `Case Description` into generated `Verizon Case Description`.
+-- PR59984 now recognizes `Element Number ` and retrieves J.1 prices for elements `01`, `04`, and `05`.
+-- PR59984 blank-element row for `AA01603.AA01703.PHNHAZVA.10G` now uses `AA01703.10G.PHNHAZVA.MRC` as the description tie-break and retrieves the matching J.1 MRC price instead of the first case-number match.
++- `Element Number`
++- `Element #`
++- `Element No`
++- `Element`
++
++## J.1 matching rule
++
++For each COMP row, the script attempts to locate the corresponding J.1 rate by matching:
++
++1. Case number
++2. Current option period
++3. Pricing element, when present
++4. Case description, only as a fallback when pricing element is blank and multiple same-case/same-period J.1 candidates exist
++
++This is a general matching rule and should not depend on specific PR numbers, case numbers, or source cell text.
+diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/F_R_SCRIPT_SOURCE_HEADER_AUDIT_v00.04.018.md /mnt/data/work_v018/mod-automation-main/F_R_SCRIPT_SOURCE_HEADER_AUDIT_v00.04.018.md
+--- /mnt/data/v017_baseline_for018/mod-automation-main/F_R_SCRIPT_SOURCE_HEADER_AUDIT_v00.04.018.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v018/mod-automation-main/F_R_SCRIPT_SOURCE_HEADER_AUDIT_v00.04.018.md	2026-06-10 02:54:35.374081422 +0000
+@@ -0,0 +1,55 @@
++# v00.04.018 F&R Source Header Audit
++
++## Issue addressed
++
++The F&R workbook script needed broader handling for the COMP-sheet field that feeds the generated output column:
++
++`Source or Networx Information`
++
++The prior fix accepted the observed `Source or Network Information` header, but the implementation needed to be generalized so it accepts the family of source/network/networx information headers instead of relying on one narrow alias.
++
++## Corrected behavior
++
++`03_F_and_R_script.py` now detects source-information headers by normalized header meaning, not by cell value and not by PR-specific data.
++
++Accepted header examples include:
++
++- `Source or Networx Information`
++- `Source or Network Information`
++- `Source Information`
++- `Networx Information`
++- `Network Information`
++- `Source or Networx Info`
++- `Source or Network Info`
++- `Source Info`
++- `Networx Info`
++- `Network Info`
++
++The generated workbook still uses the canonical output header:
++
++`Source or Networx Information`
++
++## Multiple matching columns
++
++If a COMP sheet contains more than one matching source/network/networx information column, the script combines the unique nonblank values into the generated output cell, separated by ` / `.
++
++This mirrors the approach used for separate Verizon response and HHS comment fields.
++
++## What was not changed
++
++- No PR-specific case numbers were added.
++- No source cell values were hard-coded.
++- No logic was added for literal values such as vendor-quote text.
++- J.1 headers are still expected on Row 1 only.
++- J.1 price matching still uses normalized value matching across case number, pricing element, option period, and case description fallback when the COMP pricing element is blank.
++
++## Validation performed
++
++Targeted validation confirmed that the source-header detector accepts the intended header variants and rejects unrelated headers such as:
++
++- `Verizon Response`
++- `HHS Comment`
++- `Case Number`
++- `Information`
++
++Python compilation was also run against `03_F_and_R_script.py`.
+diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/README.md /mnt/data/work_v018/mod-automation-main/README.md
+--- /mnt/data/v017_baseline_for018/mod-automation-main/README.md	2026-06-10 02:28:34.000000000 +0000
++++ /mnt/data/work_v018/mod-automation-main/README.md	2026-06-10 02:54:37.199929067 +0000
+@@ -313,3 +313,7 @@
+ - The comp sheet is empty or missing expected columns.
+ - Multiple files/versions exist for the same PR; the current script groups tabs primarily by PR number.
+ 
++## v00.04.018 note — F&R Source or Networx Information
++
++The F&R script now accepts broader COMP-sheet header variants for the generated `Source or Networx Information` output column, including `Source Information`, `Networx Information`, `Network Information`, and shortened `Info` variants. This is header-based only; no PR-specific source values or case numbers are hard-coded.
++
+diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/README_v00.04.018.md /mnt/data/work_v018/mod-automation-main/README_v00.04.018.md
+--- /mnt/data/v017_baseline_for018/mod-automation-main/README_v00.04.018.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v018/mod-automation-main/README_v00.04.018.md	2026-06-10 02:54:35.411169532 +0000
+@@ -0,0 +1,57 @@
++# Mod Automation — v00.04.018
++
++This package continues the `v00.04.xxx` controller/UI line and applies a targeted fix to the F&R workbook script.
++
++## Primary fix
++
++`03_F_and_R_script.py` now handles additional COMP-sheet header variants for the generated output column:
++
++`Source or Networx Information`
++
++Accepted input headers include:
++
++- `Source or Networx Information`
++- `Source or Network Information`
++- `Source Information`
++- `Networx Information`
++- `Network Information`
++- `Source or Networx Info`
++- `Source or Network Info`
++- `Source Info`
++- `Networx Info`
++- `Network Info`
++
++The output workbook still uses the canonical header:
++
++`Source or Networx Information`
++
++## J.1 price matching
++
++The J.1 price-matching approach from `v00.04.017` is preserved:
++
++- J.1 headers are expected on Row 1 only.
++- Matching uses normalized case number, pricing element, and option period.
++- If the COMP pricing element is blank and multiple J.1 rows match the same case/period, the case description is used as a fallback tie-breaker.
++
++## What this version avoids
++
++This version does not hard-code PR-specific examples, case numbers, or source cell values. The source-field fix is based on header detection only.
++
++## Run
++
++Use the controller UI:
++
++```bash
++python mod_automation_ui.py
++```
++
++Or run the F&R script directly:
++
++```bash
++python 03_F_and_R_script.py --overview-file "path/to/overview.xlsx" --pr-dir "path/to/pr_files" --output-file "path/to/f_r_output.xlsx"
++```
++
++## Validation
++
++- Python compilation completed for `03_F_and_R_script.py`.
++- Targeted tests confirmed accepted source-header variants and rejected unrelated headers.
+diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/v00.04.018_fr_source_header_fix.diff /mnt/data/work_v018/mod-automation-main/v00.04.018_fr_source_header_fix.diff
+--- /mnt/data/v017_baseline_for018/mod-automation-main/v00.04.018_fr_source_header_fix.diff	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v018/mod-automation-main/v00.04.018_fr_source_header_fix.diff	2026-06-10 02:55:15.448338147 +0000
+@@ -0,0 +1,395 @@
++diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/03_F_and_R_script.py /mnt/data/work_v018/mod-automation-main/03_F_and_R_script.py
++--- /mnt/data/v017_baseline_for018/mod-automation-main/03_F_and_R_script.py	2026-06-10 02:40:28.000000000 +0000
+++++ /mnt/data/work_v018/mod-automation-main/03_F_and_R_script.py	2026-06-10 02:53:55.269604377 +0000
++@@ -66,6 +66,47 @@
++     return [col for col in df.columns if _is_comment_header(col)]
++ 
++ 
+++def _is_source_or_networx_header(header):
+++    """Return True for accepted Source/Networx/Network information headers.
+++
+++    This intentionally matches header labels, not cell values. It accepts the
+++    canonical project wording plus common variants such as "Source Information",
+++    "Networx Information", "Network Information", and shortened "Info" forms.
+++    """
+++    h = _normalise_header_name(header)
+++    if not h:
+++        return False
+++
+++    direct_aliases = {
+++        _normalise_header_name(alias)
+++        for alias in (
+++            "Source or Networx Information",
+++            "Source or Network Information",
+++            "Source Information",
+++            "Networx Information",
+++            "Network Information",
+++            "Source or Networx Info",
+++            "Source or Network Info",
+++            "Source Info",
+++            "Networx Info",
+++            "Network Info",
+++        )
+++    }
+++    if h in direct_aliases:
+++        return True
+++
+++    has_info_word = "information" in h or h.endswith("info") or "info" in h
+++    has_source_word = "source" in h
+++    has_network_word = "networx" in h or "network" in h
+++
+++    return has_info_word and (has_source_word or has_network_word)
+++
+++
+++def _source_or_networx_columns(df):
+++    """Find COMP-sheet columns that should feed Source or Networx Information."""
+++    return [col for col in df.columns if _is_source_or_networx_header(col)]
+++
+++
++ def _find_column_by_alias(df, aliases):
++     """Return the first DataFrame column matching any normalized alias."""
++     normalized_to_column = {_normalise_header_name(col): col for col in df.columns}
++@@ -285,18 +326,13 @@
++     if not comment_cols:
++         print("  No Verizon/HHS response/comment column variant found on COMP sheet")
++ 
+++    source_cols = _source_or_networx_columns(comps_df)
+++    if not source_cols:
+++        print("  No Source/Networx/Network information column variant found on COMP sheet")
+++
++     for i in range(num_rows):
++         verizon_response = _combined_row_text(comps_df, i, comment_cols)
++-        source_info = _get_row_value_by_alias(
++-            comps_df, i,
++-            [
++-                "Source or Networx Information",
++-                "Source or Network Information",
++-                "Source Information",
++-                "Networx Information",
++-                "Network Information",
++-            ],
++-        )
+++        source_info = _combined_row_text(comps_df, i, source_cols)
++         case_number = _get_row_value_by_alias(comps_df, i, ["Case Number", "Case #", "Case No"])
++         verizon_case_desc = _get_row_value_by_alias(
++             comps_df, i,
++diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/CHANGELOG.md /mnt/data/work_v018/mod-automation-main/CHANGELOG.md
++--- /mnt/data/v017_baseline_for018/mod-automation-main/CHANGELOG.md	2026-06-10 02:28:34.000000000 +0000
+++++ /mnt/data/work_v018/mod-automation-main/CHANGELOG.md	2026-06-10 02:54:37.199224874 +0000
++@@ -335,3 +335,18 @@
++ ## Earlier versions
++ 
++ Earlier package history was not included in this ZIP. This changelog starts with the path and filename flexibility refactor.
+++
+++## v00.04.018 — F&R source-header generalization
+++
+++### Fixed
+++
+++- Generalized COMP-sheet source-header detection for the generated `Source or Networx Information` field.
+++- Accepted broader variants such as `Source Information`, `Networx Information`, `Network Information`, and shortened `Info` variants.
+++- Combined unique nonblank values when multiple source/network/networx information columns exist.
+++
+++### Preserved
+++
+++- J.1 headers remain Row 1 only.
+++- J.1 price matching remains based on normalized case number, pricing element, option period, and description fallback when the COMP pricing element is blank.
+++- No PR-specific case numbers or source cell values were hard-coded.
+++
++diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/CHANGELOG_v00.04.018.md /mnt/data/work_v018/mod-automation-main/CHANGELOG_v00.04.018.md
++--- /mnt/data/v017_baseline_for018/mod-automation-main/CHANGELOG_v00.04.018.md	1970-01-01 00:00:00.000000000 +0000
+++++ /mnt/data/work_v018/mod-automation-main/CHANGELOG_v00.04.018.md	2026-06-10 02:54:35.398087876 +0000
++@@ -0,0 +1,27 @@
+++# Changelog — v00.04.018
+++
+++## Fixed
+++
+++### F&R workbook source-information field
+++
+++- Generalized COMP-sheet source-header detection for the generated `Source or Networx Information` output column.
+++- Accepted broader header variants, including:
+++  - `Source Information`
+++  - `Networx Information`
+++  - `Network Information`
+++  - `Source or Networx Information`
+++  - `Source or Network Information`
+++  - shortened `Info` variants of the above.
+++- Combined unique nonblank values when more than one matching source/network/networx information column exists.
+++
+++## Preserved
+++
+++- J.1 headers are still read from Row 1 only.
+++- J.1 price matching still uses normalized case number, pricing element, option period, and case-description fallback when the COMP pricing element is blank.
+++- No PR-specific case numbers, source cell values, or vendor-quote text were added as hard-coded exceptions.
+++- Overview logic from `v00.04.015` remains unchanged.
+++
+++## Validation
+++
+++- Confirmed `03_F_and_R_script.py` compiles.
+++- Ran targeted header-detection tests for accepted and rejected source/header variants.
++diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/F_R_SCRIPT_J1_SOURCE_AUDIT_v00.04.017.md /mnt/data/work_v018/mod-automation-main/F_R_SCRIPT_J1_SOURCE_AUDIT_v00.04.017.md
++--- /mnt/data/v017_baseline_for018/mod-automation-main/F_R_SCRIPT_J1_SOURCE_AUDIT_v00.04.017.md	2026-06-10 02:41:17.000000000 +0000
+++++ /mnt/data/work_v018/mod-automation-main/F_R_SCRIPT_J1_SOURCE_AUDIT_v00.04.017.md	2026-06-10 02:55:03.407542862 +0000
++@@ -1,61 +1,80 @@
++-# F&R Script J.1 / Source Field Audit — v00.04.017
+++# v00.04.017 F&R Script J.1 / Source Audit
++ 
++-## Issue
++-The F&R workbook generation still had two remaining extraction/matching problems:
+++## Issues addressed in v00.04.017
++ 
++-1. COMP-sheet source details were only pulled from the exact header `Source or Networx Information`.
++-   - Sample PR60413 uses `Source or Network Information`, which caused the generated output to leave `Source or Networx Information` blank.
+++1. **COMP source/header variants were too narrow**
+++   - Some COMP sheets use `Source or Network Information` instead of the canonical generated output header `Source or Networx Information`.
+++   - The script needed to accept the observed header variant while still writing the canonical output field.
++ 
++-2. J.1 price matching still failed or selected the wrong price for some PR rows.
++-   - Sample PR59984 uses `Element Number ` on the COMP sheet instead of `SRE Pricing Element`.
++-   - Because that column was not recognized, pricing elements like `01`, `04`, and `05` were not passed into the J.1 lookup.
++-   - For rows where the COMP element number is genuinely blank, PR59984 shows multiple J.1 rows with the same case number and blank `SRE Pricing Element` for the same option period. The prior script selected the first match, which could return the NRC price when the COMP row described the MRC line.
+++2. **COMP pricing-element headers were too narrow**
+++   - Some COMP sheets use `Element Number` instead of `SRE Pricing Element`.
+++   - The script needed to read the pricing element from accepted header variants before attempting J.1 price lookup.
+++
+++3. **Blank COMP pricing element needed a safer tie-breaker**
+++   - Some COMP rows have a blank pricing element while multiple J.1 rows share the same case number and option period.
+++   - In those cases, selecting the first matching row can return the wrong J.1 rate.
+++   - The script now uses the COMP case description as a fallback tie-breaker against J.1 `ICB Case Description` when the COMP pricing element is blank.
+++
+++## Scope preserved
++ 
++-## Constraints preserved
++ - J.1 headers are still expected on Row 1 only.
++-- Required J.1 Row 1 headers remain:
++-  - `Case Number`
++-  - `SRE Pricing Element`
++-  - `TO Period`
++-  - `HHS Price`
++-- The script does not search for J.1 headers elsewhere in the PR workbook.
++-
++-## Fixes made
++-
++-### COMP header variants
++-The script now reads canonical output fields from accepted COMP header variants:
++-
++-- `Source or Networx Information`
++-  - accepts `Source or Networx Information`
++-  - accepts `Source or Network Information`
++-  - accepts related source/network/networx variants
+++- No Row 1 header search expansion was added.
+++- No PR-specific case numbers were intended to be coded as exceptions.
+++- No source cell values were intended to be coded as exceptions.
+++
+++## Field behavior after v00.04.017
+++
+++### Comment field
+++
+++The generated output field remains:
+++
+++`Verizon's Response/HHS Comment`
+++
+++The script accepts multiple source headers such as Verizon response and HHS comment variants, including common punctuation and spelling differences.
+++
+++### Source field
+++
+++The generated output field remains:
+++
+++`Source or Networx Information`
+++
+++v00.04.017 accepted the observed `Source or Network Information` header variant. v00.04.018 supersedes this with broader source/network/networx header detection.
+++
+++### Case description field
+++
+++The generated output field remains:
+++
+++`Verizon Case Description`
+++
+++The script accepts source headers such as:
++ 
++ - `Verizon Case Description`
++-  - accepts `Verizon Case Description`
++-  - accepts `Case Description`
++-  - accepts `ICB Case Description`
+++- `Case Description`
+++- `ICB Case Description`
+++- `Description`
+++
+++### Pricing element field
+++
+++The generated output field remains:
+++
+++`Pricing Element`
++ 
+++The script accepts source headers such as:
+++
+++- `SRE Pricing Element`
++ - `Pricing Element`
++-  - accepts `SRE Pricing Element`
++-  - accepts `Pricing Element`
++-  - accepts `Element Number`
++-  - accepts `Element #`, `Element No`, and `Element`
++-
++-- `Comp Rate`
++-  - accepts `Comp Rate`, `Comparison Rate`, and `Comparable Rate`
++-
++-### J.1 price matching
++-The script still reads J.1 headers from Row 1. Matching was improved as follows:
++-
++-1. Match on `Case Number` and current `TO Period`.
++-2. If COMP has a pricing element, also match on `SRE Pricing Element`.
++-3. If COMP has a blank pricing element and multiple J.1 rows share the same case/period, use the COMP case description as a tie-breaker against J.1 `ICB Case Description`.
++-4. If the match is still ambiguous and candidate prices differ, leave `J.1 Rate` blank instead of selecting an unsafe first row.
++-
++-## Sample validation
++-Using the attached sample PRs:
++-
++-- PR60413 now pulls `Source or Network Information` into generated `Source or Networx Information` as `See Vendor Quote Below`.
++-- PR60413 now pulls `Case Description` into generated `Verizon Case Description`.
++-- PR59984 now recognizes `Element Number ` and retrieves J.1 prices for elements `01`, `04`, and `05`.
++-- PR59984 blank-element row for `AA01603.AA01703.PHNHAZVA.10G` now uses `AA01703.10G.PHNHAZVA.MRC` as the description tie-break and retrieves the matching J.1 MRC price instead of the first case-number match.
+++- `Element Number`
+++- `Element #`
+++- `Element No`
+++- `Element`
+++
+++## J.1 matching rule
+++
+++For each COMP row, the script attempts to locate the corresponding J.1 rate by matching:
+++
+++1. Case number
+++2. Current option period
+++3. Pricing element, when present
+++4. Case description, only as a fallback when pricing element is blank and multiple same-case/same-period J.1 candidates exist
+++
+++This is a general matching rule and should not depend on specific PR numbers, case numbers, or source cell text.
++diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/F_R_SCRIPT_SOURCE_HEADER_AUDIT_v00.04.018.md /mnt/data/work_v018/mod-automation-main/F_R_SCRIPT_SOURCE_HEADER_AUDIT_v00.04.018.md
++--- /mnt/data/v017_baseline_for018/mod-automation-main/F_R_SCRIPT_SOURCE_HEADER_AUDIT_v00.04.018.md	1970-01-01 00:00:00.000000000 +0000
+++++ /mnt/data/work_v018/mod-automation-main/F_R_SCRIPT_SOURCE_HEADER_AUDIT_v00.04.018.md	2026-06-10 02:54:35.374081422 +0000
++@@ -0,0 +1,55 @@
+++# v00.04.018 F&R Source Header Audit
+++
+++## Issue addressed
+++
+++The F&R workbook script needed broader handling for the COMP-sheet field that feeds the generated output column:
+++
+++`Source or Networx Information`
+++
+++The prior fix accepted the observed `Source or Network Information` header, but the implementation needed to be generalized so it accepts the family of source/network/networx information headers instead of relying on one narrow alias.
+++
+++## Corrected behavior
+++
+++`03_F_and_R_script.py` now detects source-information headers by normalized header meaning, not by cell value and not by PR-specific data.
+++
+++Accepted header examples include:
+++
+++- `Source or Networx Information`
+++- `Source or Network Information`
+++- `Source Information`
+++- `Networx Information`
+++- `Network Information`
+++- `Source or Networx Info`
+++- `Source or Network Info`
+++- `Source Info`
+++- `Networx Info`
+++- `Network Info`
+++
+++The generated workbook still uses the canonical output header:
+++
+++`Source or Networx Information`
+++
+++## Multiple matching columns
+++
+++If a COMP sheet contains more than one matching source/network/networx information column, the script combines the unique nonblank values into the generated output cell, separated by ` / `.
+++
+++This mirrors the approach used for separate Verizon response and HHS comment fields.
+++
+++## What was not changed
+++
+++- No PR-specific case numbers were added.
+++- No source cell values were hard-coded.
+++- No logic was added for literal values such as vendor-quote text.
+++- J.1 headers are still expected on Row 1 only.
+++- J.1 price matching still uses normalized value matching across case number, pricing element, option period, and case description fallback when the COMP pricing element is blank.
+++
+++## Validation performed
+++
+++Targeted validation confirmed that the source-header detector accepts the intended header variants and rejects unrelated headers such as:
+++
+++- `Verizon Response`
+++- `HHS Comment`
+++- `Case Number`
+++- `Information`
+++
+++Python compilation was also run against `03_F_and_R_script.py`.
++diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/README.md /mnt/data/work_v018/mod-automation-main/README.md
++--- /mnt/data/v017_baseline_for018/mod-automation-main/README.md	2026-06-10 02:28:34.000000000 +0000
+++++ /mnt/data/work_v018/mod-automation-main/README.md	2026-06-10 02:54:37.199929067 +0000
++@@ -313,3 +313,7 @@
++ - The comp sheet is empty or missing expected columns.
++ - Multiple files/versions exist for the same PR; the current script groups tabs primarily by PR number.
++ 
+++## v00.04.018 note — F&R Source or Networx Information
+++
+++The F&R script now accepts broader COMP-sheet header variants for the generated `Source or Networx Information` output column, including `Source Information`, `Networx Information`, `Network Information`, and shortened `Info` variants. This is header-based only; no PR-specific source values or case numbers are hard-coded.
+++
++diff -ruN '--exclude=__pycache__' /mnt/data/v017_baseline_for018/mod-automation-main/README_v00.04.018.md /mnt/data/work_v018/mod-automation-main/README_v00.04.018.md
++--- /mnt/data/v017_baseline_for018/mod-automation-main/README_v00.04.018.md	1970-01-01 00:00:00.000000000 +0000
+++++ /mnt/data/work_v018/mod-automation-main/README_v00.04.018.md	2026-06-10 02:54:35.411169532 +0000
++@@ -0,0 +1,57 @@
+++# Mod Automation — v00.04.018
+++
+++This package continues the `v00.04.xxx` controller/UI line and applies a targeted fix to the F&R workbook script.
+++
+++## Primary fix
+++
+++`03_F_and_R_script.py` now handles additional COMP-sheet header variants for the generated output column:
+++
+++`Source or Networx Information`
+++
+++Accepted input headers include:
+++
+++- `Source or Networx Information`
+++- `Source or Network Information`
+++- `Source Information`
+++- `Networx Information`
+++- `Network Information`
+++- `Source or Networx Info`
+++- `Source or Network Info`
+++- `Source Info`
+++- `Networx Info`
+++- `Network Info`
+++
+++The output workbook still uses the canonical header:
+++
+++`Source or Networx Information`
+++
+++## J.1 price matching
+++
+++The J.1 price-matching approach from `v00.04.017` is preserved:
+++
+++- J.1 headers are expected on Row 1 only.
+++- Matching uses normalized case number, pricing element, and option period.
+++- If the COMP pricing element is blank and multiple J.1 rows match the same case/period, the case description is used as a fallback tie-breaker.
+++
+++## What this version avoids
+++
+++This version does not hard-code PR-specific examples, case numbers, or source cell values. The source-field fix is based on header detection only.
+++
+++## Run
+++
+++Use the controller UI:
+++
+++```bash
+++python mod_automation_ui.py
+++```
+++
+++Or run the F&R script directly:
+++
+++```bash
+++python 03_F_and_R_script.py --overview-file "path/to/overview.xlsx" --pr-dir "path/to/pr_files" --output-file "path/to/f_r_output.xlsx"
+++```
+++
+++## Validation
+++
+++- Python compilation completed for `03_F_and_R_script.py`.
+++- Targeted tests confirmed accepted source-header variants and rejected unrelated headers.

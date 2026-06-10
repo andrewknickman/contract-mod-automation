@@ -1,0 +1,250 @@
+--- /mnt/data/fr_orig/mod-automation-main/03_F_and_R_script.py	2026-06-10 02:27:50.000000000 +0000
++++ /mnt/data/fr_debug/mod-automation-main/03_F_and_R_script.py	2026-06-10 02:40:28.110064620 +0000
+@@ -66,6 +66,27 @@
+     return [col for col in df.columns if _is_comment_header(col)]
+ 
+ 
++def _find_column_by_alias(df, aliases):
++    """Return the first DataFrame column matching any normalized alias."""
++    normalized_to_column = {_normalise_header_name(col): col for col in df.columns}
++    for alias in aliases:
++        col = normalized_to_column.get(_normalise_header_name(alias))
++        if col is not None:
++            return col
++    return None
++
++
++def _get_row_value_by_alias(df, row_index, aliases):
++    """Get a row value from the first matching header alias, or blank if none exists."""
++    col = _find_column_by_alias(df, aliases)
++    if col is None:
++        return ""
++    try:
++        return df[col].iloc[row_index]
++    except Exception:
++        return ""
++
++
+ def _combined_row_text(df, row_index, columns):
+     """Combine unique nonblank values from one or more source columns in a row."""
+     values = []
+@@ -142,6 +163,35 @@
+         return False
+ 
+ 
++def _normalise_description(value):
++    """Normalize case-description text for J.1 tie-break matching."""
++    s = _clean(value).upper().replace("\u00a0", " ")
++    return re.sub(r"[^A-Z0-9]+", "", s)
++
++
++def _descriptions_match(left, right):
++    left_norm = _normalise_description(left)
++    right_norm = _normalise_description(right)
++    return bool(left_norm and right_norm and left_norm == right_norm)
++
++
++def _unique_price_or_none(candidates):
++    """Return a candidate price only if all nonblank candidate prices agree."""
++    prices = []
++    for candidate in candidates:
++        price = candidate.get("price")
++        if price is not None:
++            try:
++                rounded = round(float(price), 9)
++            except (ValueError, TypeError):
++                continue
++            if rounded not in prices:
++                prices.append(rounded)
++    if len(prices) == 1:
++        return candidates[0].get("price")
++    return None
++
++
+ def _option_period_number(value):
+     """Extract the option-period number from common TO Period text/value formats."""
+     if value is None:
+@@ -237,11 +287,33 @@
+ 
+     for i in range(num_rows):
+         verizon_response = _combined_row_text(comps_df, i, comment_cols)
+-        source_info = comps_df.get("Source or Networx Information", [""] * num_rows)[i] if "Source or Networx Information" in comps_df else ""
+-        case_number = comps_df.get("Case Number", [""] * num_rows)[i] if "Case Number" in comps_df else ""
+-        verizon_case_desc = comps_df.get("Verizon Case Description", [""] * num_rows)[i] if "Verizon Case Description" in comps_df else ""
+-        pricing_element = comps_df.get("SRE Pricing Element", [""] * num_rows)[i] if "SRE Pricing Element" in comps_df else ""
+-        comp_rate_raw = comps_df.get("Comp Rate", [""] * num_rows)[i] if "Comp Rate" in comps_df else ""
++        source_info = _get_row_value_by_alias(
++            comps_df, i,
++            [
++                "Source or Networx Information",
++                "Source or Network Information",
++                "Source Information",
++                "Networx Information",
++                "Network Information",
++            ],
++        )
++        case_number = _get_row_value_by_alias(comps_df, i, ["Case Number", "Case #", "Case No"])
++        verizon_case_desc = _get_row_value_by_alias(
++            comps_df, i,
++            ["Verizon Case Description", "Case Description", "ICB Case Description", "Description"],
++        )
++        pricing_element = _get_row_value_by_alias(
++            comps_df, i,
++            [
++                "SRE Pricing Element",
++                "Pricing Element",
++                "Element Number",
++                "Element #",
++                "Element No",
++                "Element",
++            ],
++        )
++        comp_rate_raw = _get_row_value_by_alias(comps_df, i, ["Comp Rate", "Comparison Rate", "Comparable Rate"])
+         comp_rate = _parse_currency_value(comp_rate_raw)
+ 
+         record = {
+@@ -299,16 +371,56 @@
+ 
+ 
+ 
+-def get_j1_rate(pr_file: Path, case_number: str, pricing_element: str):
++def _select_j1_candidate(candidates, target_case, target_pricing, target_desc, pr_file_name):
++    """Select the safest J.1 match from candidates already filtered by case/period."""
++    if not candidates:
++        print(
++            f"  No J.1 price match in {pr_file_name} "
++            f"for Case Number={target_case}, SRE Pricing Element={target_pricing or '[blank]'}, "
++            f"TO Period=OPT PD {CURRENT_OPTION_PERIOD}"
++        )
++        return None
++
++    # If COMP supplied a pricing element, those rows are already filtered by element.
++    # Return the first matching price to preserve the original behavior.
++    if target_pricing:
++        return candidates[0].get("price")
++
++    # If COMP did not supply a pricing element, use the case description as the
++    # tie-breaker. This handles PR rows with the same Case Number and blank SRE
++    # Pricing Element but separate NRC/MRC J.1 lines.
++    if target_desc:
++        desc_matches = [c for c in candidates if _descriptions_match(c.get("description"), target_desc)]
++        if desc_matches:
++            return desc_matches[0].get("price")
++
++    if len(candidates) == 1:
++        return candidates[0].get("price")
++
++    same_price = _unique_price_or_none(candidates)
++    if same_price is not None:
++        return same_price
++
++    print(
++        f"  Ambiguous J.1 price match in {pr_file_name} "
++        f"for Case Number={target_case}, blank SRE Pricing Element, "
++        f"TO Period=OPT PD {CURRENT_OPTION_PERIOD}; leaving J.1 Rate blank"
++    )
++    return None
++
++
++def get_j1_rate(pr_file: Path, case_number: str, pricing_element: str, case_description: str = ""):
+     """
+     Extract J.1 rate from the J.1 worksheet for a given case number and pricing element.
+ 
+-    J.1 headers are expected on Row 1 of the PR file. Matching is made tolerant
+-    to Excel cell-type differences, such as numeric case numbers, pricing element
+-    1 vs 01, and TO Period values like OPT PD 5 vs OPT PD 05.
++    J.1 headers are expected on Row 1 of the PR file. Matching is tolerant to
++    Excel cell-type differences. If the COMP row has a blank pricing element and
++    multiple J.1 rows share the same case/period, the COMP case description is
++    used as a tie-breaker against the J.1 ICB Case Description.
+     """
+     target_case = _normalise_case_number(case_number)
+     target_pricing = _normalise_pricing_element(pricing_element)
++    target_desc = _clean(case_description)
+ 
+     try:
+         if pr_file.suffix.lower() == ".xlsb":
+@@ -323,19 +435,19 @@
+             if not required.issubset(set(df.columns)):
+                 print(f"  Missing required Row 1 columns in J1 sheet of {pr_file.name}")
+                 return None
++            candidates = []
+             for _, row in df.iterrows():
+-                if (
+-                    _case_numbers_match(row.get("Case Number"), target_case)
+-                    and _pricing_elements_match(row.get("SRE Pricing Element"), target_pricing)
+-                    and _option_period_matches(row.get("TO Period"), CURRENT_OPTION_PERIOD)
+-                ):
+-                    return _parse_currency_value(row.get("HHS Price"))
+-            print(
+-                f"  No J.1 price match in {pr_file.name} "
+-                f"for Case Number={target_case}, SRE Pricing Element={target_pricing}, "
+-                f"TO Period=OPT PD {CURRENT_OPTION_PERIOD}"
+-            )
+-            return None
++                if not _case_numbers_match(row.get("Case Number"), target_case):
++                    continue
++                if not _option_period_matches(row.get("TO Period"), CURRENT_OPTION_PERIOD):
++                    continue
++                if target_pricing and not _pricing_elements_match(row.get("SRE Pricing Element"), target_pricing):
++                    continue
++                candidates.append({
++                    "price": _parse_currency_value(row.get("HHS Price")),
++                    "description": row.get("ICB Case Description", ""),
++                })
++            return _select_j1_candidate(candidates, target_case, target_pricing, target_desc, pr_file.name)
+ 
+         wb = load_workbook(pr_file, data_only=True)
+         j1_sheet = next((s for s in wb.sheetnames if "j1" in s.lower() or "j.1" in s.lower()), None)
+@@ -362,27 +474,28 @@
+         pricing_col = headers["SRE Pricing Element"]
+         period_col = headers["TO Period"]
+         price_col = headers["HHS Price"]
++        desc_col = headers.get("ICB Case Description")
+ 
++        candidates = []
+         for row in ws.iter_rows(min_row=2):
+             row_case = row[case_col - 1].value
+             row_pricing = row[pricing_col - 1].value
+             row_period = row[period_col - 1].value
+-            if (
+-                _case_numbers_match(row_case, target_case)
+-                and _pricing_elements_match(row_pricing, target_pricing)
+-                and _option_period_matches(row_period, CURRENT_OPTION_PERIOD)
+-            ):
+-                result = _parse_currency_value(row[price_col - 1].value)
+-                wb.close()
+-                return result
++            if not _case_numbers_match(row_case, target_case):
++                continue
++            if not _option_period_matches(row_period, CURRENT_OPTION_PERIOD):
++                continue
++            if target_pricing and not _pricing_elements_match(row_pricing, target_pricing):
++                continue
++            row_description = row[desc_col - 1].value if desc_col else ""
++            candidates.append({
++                "price": _parse_currency_value(row[price_col - 1].value),
++                "description": row_description,
++            })
+ 
++        result = _select_j1_candidate(candidates, target_case, target_pricing, target_desc, pr_file.name)
+         wb.close()
+-        print(
+-            f"  No J.1 price match in {pr_file.name} "
+-            f"for Case Number={target_case}, SRE Pricing Element={target_pricing}, "
+-            f"TO Period=OPT PD {CURRENT_OPTION_PERIOD}"
+-        )
+-        return None
++        return result
+ 
+     except Exception as e:
+         print(f"  Error reading J1 sheet from {pr_file.name}: {e}")
+@@ -432,7 +545,7 @@
+                 price_elem_raw = rec.get("Pricing Element", "")
+                 price_elem_str = _normalise_pricing_element(price_elem_raw)
+ 
+-                j1_rate_float = get_j1_rate(pr_file, case_num_str, price_elem_str)
++                j1_rate_float = get_j1_rate(pr_file, case_num_str, price_elem_str, rec.get("Verizon Case Description", ""))
+                 comp_rate_float = rec.get("Comp Rate")
+ 
+                 delta_float = None

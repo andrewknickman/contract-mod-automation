@@ -1,0 +1,170 @@
+diff -ru /mnt/data/compare_v008_orig/mod-automation-main/06_J17_file_script.py /mnt/data/compare_ui/mod-automation-main/06_J17_file_script.py
+--- /mnt/data/compare_v008_orig/mod-automation-main/06_J17_file_script.py	2026-06-10 00:40:29.000000000 +0000
++++ /mnt/data/compare_ui/mod-automation-main/06_J17_file_script.py	2026-06-10 01:20:38.040770877 +0000
+@@ -20,7 +20,8 @@
+ 
+ # ─── Configuration ────────────────────────────────────────────────────────────
+ current_option_period = 5
+-current_month = None
++DEFAULT_CURRENT_MONTH = "December"
++current_month = DEFAULT_CURRENT_MONTH
+ 
+ 
+ def extract_month_from_filename(filename):
+@@ -334,7 +335,8 @@
+     parser.add_argument("--billing-file", help="EIS Billing Detail workbook")
+     parser.add_argument("--output-file", help="Output updated J.17 workbook path")
+     parser.add_argument("--option-period", type=int, default=current_option_period, help="Current option period")
+-    parser.add_argument("--current-month", help="Month used to identify expired subscriptions; defaults to billing filename month when found")
++    parser.add_argument("--current-month", default=DEFAULT_CURRENT_MONTH,
++                        help="Month used to identify expired subscriptions; defaults to December to preserve original behavior")
+     return parser.parse_args(argv)
+ 
+ 
+@@ -347,9 +349,7 @@
+     j1_current_file = choose_existing_file(args.j1_current_file, "Select the updated/current J.1 workbook", EXCEL_FILETYPES)
+     eis_billing_file = choose_existing_file(args.billing_file, "Select the EIS Billing Detail workbook", EXCEL_FILETYPES)
+     j17_updated_file = choose_save_file(args.output_file, "Save the updated J.17 workbook as", "j17_updated_file.xlsx", EXCEL_FILETYPES)
+-    current_month = args.current_month or extract_month_name_from_filename(str(eis_billing_file))
+-    if not current_month:
+-        current_month = input("Current billing month for expired-subscription logic (for example, March): ").strip()
++    current_month = args.current_month or DEFAULT_CURRENT_MONTH
+ 
+ 
+ def main(argv=None):
+diff -ru /mnt/data/compare_v008_orig/mod-automation-main/CHANGELOG.md /mnt/data/compare_ui/mod-automation-main/CHANGELOG.md
+--- /mnt/data/compare_v008_orig/mod-automation-main/CHANGELOG.md	2026-06-10 00:51:18.000000000 +0000
++++ /mnt/data/compare_ui/mod-automation-main/CHANGELOG.md	2026-06-10 01:21:14.409539449 +0000
+@@ -4,6 +4,26 @@
+ 
+ Versioning note: this project is currently continuing the `v00.04.xxx` iteration line unless/until the base version is intentionally bumped.
+ 
++## v00.04.009 - Controller Regression Audit and Preflight Fix
++
++### Fixed
++
++- Fixed controller preflight handling for fields that are outputs in an earlier step and inputs in a later step.
++- Full-workflow preflight now allows planned prior outputs, such as generated coversheets, overview workbook, build workbook, current J.1 workbook, and updated J.17 workbook, to be created during the run instead of incorrectly requiring them to exist before the workflow starts.
++- Individual step preflight now correctly requires those same prior-output paths to already exist when running that step by itself.
++- Restored the original J.17 expired-subscription default month behavior by defaulting the billing/current month to `December` unless the user overrides it in the UI or CLI.
++
++### Audited
++
++- Compared the original seven-script project against the controller UI package.
++- Confirmed all original processing scripts remain present.
++- Confirmed no original top-level processing functions were removed from the seven scripts.
++- Confirmed the controller delegates to the scripts rather than replacing their business logic.
++
++### Validation
++
++- Confirmed all Python files compile with `python -m py_compile`.
++- Confirmed the J.17 script exposes the restored `--current-month` default behavior through `--help`.
+ 
+ ## v00.04.008 - Controller UI Update
+ 
+diff -ru /mnt/data/compare_v008_orig/mod-automation-main/README.md /mnt/data/compare_ui/mod-automation-main/README.md
+--- /mnt/data/compare_v008_orig/mod-automation-main/README.md	2026-06-10 00:51:18.000000000 +0000
++++ /mnt/data/compare_ui/mod-automation-main/README.md	2026-06-10 01:21:14.410186196 +0000
+@@ -35,6 +35,7 @@
+ | `RUN_UI.command` | macOS/Linux launcher for the controller UI. |
+ | `PATH_FLEXIBILITY_REPORT.md` | Detailed report of removed hard-coded paths and filename assumptions. |
+ | `path_flexibility.diff` | Patch diff showing the path/file-selection refactor. |
++| `REGRESSION_AUDIT.md` | Comparison notes confirming original script functions were preserved and documenting the controller preflight fix. |
+ 
+ ## Requirements
+ 
+@@ -86,10 +87,10 @@
+ 
+ 1. Open `mod_automation_ui.py` or run `RUN_UI.bat`.
+ 2. On the **Setup** tab, select the required source files and folders.
+-3. Enter the mod number, current option period, and billing month if needed.
++3. Enter the mod number, current option period, and billing month if needed. The billing month defaults to `December` to match the original J.17 script behavior; change it when processing a different cycle.
+ 4. Select or create the run output folder.
+ 5. Click **Set default output names** to create standard output paths for the run.
+-6. Click **Preflight all steps** to check for missing files and folders.
++6. Click **Preflight all steps** to check for missing files and folders. The controller understands that some files are created by earlier steps and then consumed by later steps during a full workflow run.
+ 7. Use **Run full workflow** or run individual steps from the **Run Workflow** tab.
+ 8. Review the **Log** tab for script output and errors.
+ 
+Only in /mnt/data/compare_ui/mod-automation-main: REGRESSION_AUDIT.md
+diff -ru /mnt/data/compare_v008_orig/mod-automation-main/mod_automation_ui.py /mnt/data/compare_ui/mod-automation-main/mod_automation_ui.py
+--- /mnt/data/compare_v008_orig/mod-automation-main/mod_automation_ui.py	2026-06-10 00:51:49.000000000 +0000
++++ /mnt/data/compare_ui/mod-automation-main/mod_automation_ui.py	2026-06-10 01:20:38.039996130 +0000
+@@ -226,7 +226,7 @@
+         self.meta_vars: Dict[str, tk.StringVar] = {
+             "current_op": tk.StringVar(value="5"),
+             "mod_number": tk.StringVar(value="P00078"),
+-            "current_month": tk.StringVar(value=""),
++            "current_month": tk.StringVar(value="December"),
+             "python_executable": tk.StringVar(value=sys.executable),
+         }
+         self.use_generated_coversheets = tk.BooleanVar(value=True)
+@@ -303,7 +303,7 @@
+         self._add_text_row(general, 1, "Mod number", self.meta_vars["mod_number"])
+         self._add_text_row(general, 2, "Current option period", self.meta_vars["current_op"])
+         self._add_text_row(general, 3, "Billing current month", self.meta_vars["current_month"])
+-        ttk.Label(general, text="Month is optional. The J.17 script can infer it from the billing filename when possible.").grid(
++        ttk.Label(general, text="Defaults to December to preserve the original J.17 behavior; change it for the billing cycle you are processing.").grid(
+             row=4, column=1, sticky="w", pady=(0, 4)
+         )
+ 
+@@ -623,6 +623,12 @@
+         if not python_exe.exists():
+             issues.append(f"Python executable not found: {python_exe}")
+ 
++        # Some path fields are outputs in one step and inputs in a later step.
++        # Full-workflow preflight should allow those planned earlier outputs to be
++        # missing before the run starts, but single-step preflight should require
++        # them to already exist.
++        planned_prior_outputs = set()
++
+         for step in selected_steps:
+             script_path = PROJECT_DIR / step.script
+             if not script_path.is_file():
+@@ -637,19 +643,26 @@
+                 if key in FIELD_LOOKUP:
+                     field = FIELD_LOOKUP[key]
+                     p = Path(value).expanduser()
+-                    if field.kind == "file" and not p.is_file():
++                    is_output_for_this_step = key in step.output_keys
++                    will_be_created_by_prior_step = key in planned_prior_outputs
++
++                    if is_output_for_this_step:
++                        if field.kind == "folder":
++                            parent = p.parent
++                            if parent and not parent.exists():
++                                warnings.append(f"Step {step.number} will create output folder under: {parent}")
++                        elif field.kind.startswith("save_"):
++                            parent = p.parent
++                            if parent and not parent.exists():
++                                warnings.append(f"Step {step.number} will create output folder: {parent}")
++                    elif will_be_created_by_prior_step:
++                        warnings.append(f"Step {step.number} will use prior workflow output: {label}: {p}")
++                    elif field.kind == "file" and not p.is_file():
+                         issues.append(f"Step {step.number} input file not found: {label}: {p}")
+-                    elif field.kind == "folder" and key not in step.output_keys and not p.is_dir():
++                    elif field.kind == "folder" and not p.is_dir():
+                         issues.append(f"Step {step.number} input folder not found: {label}: {p}")
+-                    elif field.kind == "folder" and key in step.output_keys:
+-                        # Output folders can be created later.
+-                        parent = p.parent
+-                        if parent and not parent.exists():
+-                            warnings.append(f"Step {step.number} will create output folder under: {parent}")
+-                    elif field.kind.startswith("save_"):
+-                        parent = p.parent
+-                        if parent and not parent.exists():
+-                            warnings.append(f"Step {step.number} will create output folder: {parent}")
++                    elif field.kind.startswith("save_") and not p.is_file():
++                        issues.append(f"Step {step.number} input file not found: {label}: {p}")
+ 
+             for key in step.optional_keys:
+                 value = self._value_for_key(key)
+@@ -659,6 +672,8 @@
+                     if field.kind == "file" and not p.is_file():
+                         warnings.append(f"Step {step.number} optional file not found and will be skipped: {self._label_for_key(key)}: {p}")
+ 
++            planned_prior_outputs.update(step.output_keys)
++
+         if issues:
+             message = "Preflight found issues:\n\n" + "\n".join(f"- {item}" for item in issues)
+             if warnings:

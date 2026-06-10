@@ -1,0 +1,1190 @@
+diff -ruN /mnt/data/v015_baseline_for016/mod-automation-main/03_F_and_R_script.py /mnt/data/work_v0016/mod-automation-main/03_F_and_R_script.py
+--- /mnt/data/v015_baseline_for016/mod-automation-main/03_F_and_R_script.py	2026-06-10 01:30:54.000000000 +0000
++++ /mnt/data/work_v0016/mod-automation-main/03_F_and_R_script.py	2026-06-10 02:27:50.488472839 +0000
+@@ -1,6 +1,7 @@
+ import pandas as pd
+ import os
+ import argparse
++import re
+ from pathlib import Path
+ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+ from openpyxl import Workbook, load_workbook
+@@ -34,6 +35,162 @@
+     return s
+ 
+ 
++_HEADER_PUNCT_RE = re.compile(r"[^a-z0-9]+")
++_NUMERIC_TEXT_RE = re.compile(r"^\d+(?:\.0+)?$")
++
++
++def _normalise_header_name(value):
++    """Normalize a worksheet header for tolerant comparisons while reading Row 1 only."""
++    s = _clean(value).lower()
++    s = s.replace("’", "'").replace("`", "'")
++    # Common misspelling found in some COMP templates.
++    s = s.replace("reponse", "response")
++    s = s.replace("&", "and")
++    return _HEADER_PUNCT_RE.sub("", s)
++
++
++def _is_comment_header(header):
++    """Return True for accepted Verizon/HHS comment column-name variants."""
++    h = _normalise_header_name(header)
++    if not h:
++        return False
++    return (
++        ("verizon" in h and "response" in h and "comment" in h)
++        or ("verizon" in h and "response" in h)
++        or ("hhs" in h and "comment" in h)
++    )
++
++
++def _comment_columns(df):
++    """Find all COMP-sheet columns that should feed the F&R comment output field."""
++    return [col for col in df.columns if _is_comment_header(col)]
++
++
++def _combined_row_text(df, row_index, columns):
++    """Combine unique nonblank values from one or more source columns in a row."""
++    values = []
++    for col in columns:
++        try:
++            value = _clean(df[col].iloc[row_index])
++        except Exception:
++            value = ""
++        if value and value not in values:
++            values.append(value)
++    return " / ".join(values)
++
++
++def _normalise_case_number(value):
++    """Normalize case numbers for matching without requiring identical Excel cell types."""
++    if value is None:
++        return ""
++    if isinstance(value, float) and math.isnan(value):
++        return ""
++    if isinstance(value, (int, float)) and not isinstance(value, bool):
++        try:
++            if float(value).is_integer():
++                return str(int(value))
++        except (ValueError, TypeError):
++            pass
++    s = _clean(value)
++    if not s:
++        return ""
++    s = s.replace("\u00a0", " ").strip()
++    if _NUMERIC_TEXT_RE.fullmatch(s):
++        # Convert values like 123.0 to 123 while preserving true text values like 00123.
++        if "." in s:
++            return s.split(".", 1)[0]
++        return s
++    return re.sub(r"\s+", "", s).upper()
++
++
++def _case_numbers_match(left, right):
++    left_norm = _normalise_case_number(left)
++    right_norm = _normalise_case_number(right)
++    if left_norm == right_norm:
++        return True
++    if left_norm.isdigit() and right_norm.isdigit():
++        try:
++            return int(left_norm) == int(right_norm)
++        except ValueError:
++            return False
++    return False
++
++
++def _normalise_pricing_element(value):
++    """Normalize SRE Pricing Element values for matching/output."""
++    s = _clean(value)
++    if not s:
++        return ""
++    s = s.replace("\u00a0", " ").strip()
++    try:
++        numeric_value = float(s)
++        if numeric_value.is_integer():
++            return str(int(numeric_value)).zfill(2)
++    except (ValueError, TypeError):
++        pass
++    return s.zfill(2)
++
++
++def _pricing_elements_match(left, right):
++    left_norm = _normalise_pricing_element(left)
++    right_norm = _normalise_pricing_element(right)
++    if left_norm == right_norm:
++        return True
++    try:
++        return int(float(left_norm)) == int(float(right_norm))
++    except (ValueError, TypeError):
++        return False
++
++
++def _option_period_number(value):
++    """Extract the option-period number from common TO Period text/value formats."""
++    if value is None:
++        return None
++    if isinstance(value, float) and math.isnan(value):
++        return None
++    if isinstance(value, (int, float)) and not isinstance(value, bool):
++        try:
++            if float(value).is_integer():
++                return int(value)
++        except (ValueError, TypeError):
++            return None
++    s = _clean(value).upper()
++    if not s:
++        return None
++    numbers = re.findall(r"\d+", s)
++    if not numbers:
++        return None
++    try:
++        return int(numbers[-1])
++    except ValueError:
++        return None
++
++
++def _option_period_matches(value, current_option_period):
++    return _option_period_number(value) == int(current_option_period)
++
++
++def _parse_currency_value(value):
++    """Parse numeric/currency values from J.1 or COMP cells."""
++    if value is None:
++        return None
++    if isinstance(value, float) and math.isnan(value):
++        return None
++    if isinstance(value, (int, float)) and not isinstance(value, bool):
++        return float(value)
++    text = _clean(value)
++    if not text:
++        return None
++    negative = text.startswith("(") and text.endswith(")")
++    text = text.strip("()")
++    text = text.replace("$", "").replace(",", "").strip()
++    try:
++        parsed = float(text)
++        return -parsed if negative else parsed
++    except (ValueError, TypeError):
++        return None
++
++
+ def get_fr_pr_numbers(overview_path: Path):
+     """
+     Reads the overview file and returns a list of tuples for rows where 'F&R Needed' == 'Yes'.
+@@ -64,33 +221,28 @@
+ 
+ def extract_comps_data(comps_df):
+     """
+-    Extract all relevant F&R fields from the Comps worksheet in order:
+-    - Verizon Response
+-    - Source Info
+-    - Case Number
+-    - Verizon Case Description
+-    - Pricing Element
+-    - Comp Rate (as float)
+-    Returns a list of dicts, one per row.
++    Extract all relevant F&R fields from the Comps worksheet in order.
++
++    The output workbook keeps the canonical column name
++    "Verizon's Response/HHS Comment", but the source COMP sheet may use
++    variants such as "Verizon Response", "Verizon's Reponse",
++    "Verizon's Response", or "HHS Comment". When separate Verizon and HHS
++    comment columns exist, their nonblank values are combined.
+     """
+     records = []
+     num_rows = len(comps_df)
++    comment_cols = _comment_columns(comps_df)
++    if not comment_cols:
++        print("  No Verizon/HHS response/comment column variant found on COMP sheet")
+ 
+     for i in range(num_rows):
+-        verizon_response = comps_df.get("Verizon's Response/HHS Comment", [""] * num_rows)[i] if "Verizon's Response/HHS Comment" in comps_df else ""
++        verizon_response = _combined_row_text(comps_df, i, comment_cols)
+         source_info = comps_df.get("Source or Networx Information", [""] * num_rows)[i] if "Source or Networx Information" in comps_df else ""
+         case_number = comps_df.get("Case Number", [""] * num_rows)[i] if "Case Number" in comps_df else ""
+         verizon_case_desc = comps_df.get("Verizon Case Description", [""] * num_rows)[i] if "Verizon Case Description" in comps_df else ""
+         pricing_element = comps_df.get("SRE Pricing Element", [""] * num_rows)[i] if "SRE Pricing Element" in comps_df else ""
+         comp_rate_raw = comps_df.get("Comp Rate", [""] * num_rows)[i] if "Comp Rate" in comps_df else ""
+-        
+-        # Convert Comp Rate to float
+-        comp_rate = None
+-        if comp_rate_raw and comp_rate_raw != "":
+-            try:
+-                comp_rate = float(str(comp_rate_raw).replace('$', '').replace(',', ''))
+-            except (ValueError, TypeError):
+-                comp_rate = None
++        comp_rate = _parse_currency_value(comp_rate_raw)
+ 
+         record = {
+             "Verizon's Response/HHS Comment": _clean(verizon_response),
+@@ -98,7 +250,7 @@
+             "Case Number": _clean(case_number),
+             "Verizon Case Description": _clean(verizon_case_desc),
+             "Pricing Element": _clean(pricing_element),
+-            "Comp Rate": comp_rate,  # Now a float or None
++            "Comp Rate": comp_rate,
+         }
+ 
+         records.append(record)
+@@ -149,10 +301,15 @@
+ 
+ def get_j1_rate(pr_file: Path, case_number: str, pricing_element: str):
+     """
+-    Extract J1 rate from the J1 worksheet for a given case number and pricing element.
+-    Returns the HHS Price as a float for the row where TO Period == "OPT PD {CURRENT_OPTION_PERIOD}".
+-    Supports .xlsb through pandas because openpyxl cannot open binary Excel files.
++    Extract J.1 rate from the J.1 worksheet for a given case number and pricing element.
++
++    J.1 headers are expected on Row 1 of the PR file. Matching is made tolerant
++    to Excel cell-type differences, such as numeric case numbers, pricing element
++    1 vs 01, and TO Period values like OPT PD 5 vs OPT PD 05.
+     """
++    target_case = _normalise_case_number(case_number)
++    target_pricing = _normalise_pricing_element(pricing_element)
++
+     try:
+         if pr_file.suffix.lower() == ".xlsb":
+             xls = excel_file(pr_file)
+@@ -164,87 +321,69 @@
+             df.columns = [str(c).strip() for c in df.columns]
+             required = {"Case Number", "SRE Pricing Element", "TO Period", "HHS Price"}
+             if not required.issubset(set(df.columns)):
+-                print(f"  Missing required columns in J1 sheet of {pr_file.name}")
++                print(f"  Missing required Row 1 columns in J1 sheet of {pr_file.name}")
+                 return None
+-            target_period = f"OPT PD {CURRENT_OPTION_PERIOD}"
+             for _, row in df.iterrows():
+-                row_case = _clean(row.get("Case Number"))
+-                raw_pricing = _clean(row.get("SRE Pricing Element"))
+-                try:
+-                    row_pricing = str(int(float(raw_pricing))).zfill(2) if raw_pricing else ""
+-                except (ValueError, TypeError):
+-                    row_pricing = raw_pricing.zfill(2) if raw_pricing else ""
+-                row_period = _clean(row.get("TO Period"))
+-                if row_case == case_number and row_pricing == pricing_element and row_period == target_period:
+-                    raw_price = row.get("HHS Price")
+-                    try:
+-                        return float(str(raw_price).replace("$", "").replace(",", ""))
+-                    except (ValueError, TypeError):
+-                        return None
++                if (
++                    _case_numbers_match(row.get("Case Number"), target_case)
++                    and _pricing_elements_match(row.get("SRE Pricing Element"), target_pricing)
++                    and _option_period_matches(row.get("TO Period"), CURRENT_OPTION_PERIOD)
++                ):
++                    return _parse_currency_value(row.get("HHS Price"))
++            print(
++                f"  No J.1 price match in {pr_file.name} "
++                f"for Case Number={target_case}, SRE Pricing Element={target_pricing}, "
++                f"TO Period=OPT PD {CURRENT_OPTION_PERIOD}"
++            )
+             return None
+ 
+-        wb = load_workbook(pr_file)
++        wb = load_workbook(pr_file, data_only=True)
+         j1_sheet = next((s for s in wb.sheetnames if "j1" in s.lower() or "j.1" in s.lower()), None)
+-        
+         if not j1_sheet:
+             print(f"  No 'J1' sheet found in {pr_file.name}")
+             wb.close()
+             return None
+-        
++
+         ws = wb[j1_sheet]
+-        
+-        # Get headers from first row
++
++        # Headers are intentionally read from Row 1 only.
+         headers = {}
+         for idx, cell in enumerate(ws[1], start=1):
+             if cell.value:
+                 headers[str(cell.value).strip()] = idx
+-        
+-        # Check if required columns exist
+-        if "Case Number" not in headers or "SRE Pricing Element" not in headers or "TO Period" not in headers or "HHS Price" not in headers:
+-            print(f"  Missing required columns in J1 sheet of {pr_file.name}")
++
++        required = {"Case Number", "SRE Pricing Element", "TO Period", "HHS Price"}
++        if not required.issubset(set(headers)):
++            print(f"  Missing required Row 1 columns in J1 sheet of {pr_file.name}")
+             wb.close()
+             return None
+-        
++
+         case_col = headers["Case Number"]
+         pricing_col = headers["SRE Pricing Element"]
+         period_col = headers["TO Period"]
+         price_col = headers["HHS Price"]
+-        
+-        # Search for matching row
++
+         for row in ws.iter_rows(min_row=2):
+-            row_case = str(row[case_col - 1].value).strip() if row[case_col - 1].value else ""
+-            raw_pricing = str(row[pricing_col - 1].value).strip() if row[pricing_col - 1].value else ""
+-            try:
+-                row_pricing = str(int(float(raw_pricing))).zfill(2) if raw_pricing else ""
+-            except (ValueError, TypeError):
+-                row_pricing = raw_pricing.zfill(2) if raw_pricing else ""
+-            row_period = str(row[period_col - 1].value).strip() if row[period_col - 1].value else ""
+-            
+-            # Match case number, pricing element, and TO Period
+-            if row_case == case_number and row_pricing == pricing_element and row_period == f"OPT PD {CURRENT_OPTION_PERIOD}":
+-                hhs_price_cell = row[price_col - 1]
+-                
+-                if hhs_price_cell.value is None:
+-                    wb.close()
+-                    return None
+-                
+-                # Return as float
+-                if isinstance(hhs_price_cell.value, (int, float)):
+-                    wb.close()
+-                    return float(hhs_price_cell.value)
+-                else:
+-                    # Try to parse string value
+-                    try:
+-                        value_str = str(hhs_price_cell.value).replace('$', '').replace(',', '')
+-                        wb.close()
+-                        return float(value_str)
+-                    except (ValueError, TypeError):
+-                        wb.close()
+-                        return None
+-        
++            row_case = row[case_col - 1].value
++            row_pricing = row[pricing_col - 1].value
++            row_period = row[period_col - 1].value
++            if (
++                _case_numbers_match(row_case, target_case)
++                and _pricing_elements_match(row_pricing, target_pricing)
++                and _option_period_matches(row_period, CURRENT_OPTION_PERIOD)
++            ):
++                result = _parse_currency_value(row[price_col - 1].value)
++                wb.close()
++                return result
++
+         wb.close()
++        print(
++            f"  No J.1 price match in {pr_file.name} "
++            f"for Case Number={target_case}, SRE Pricing Element={target_pricing}, "
++            f"TO Period=OPT PD {CURRENT_OPTION_PERIOD}"
++        )
+         return None
+-        
++
+     except Exception as e:
+         print(f"  Error reading J1 sheet from {pr_file.name}: {e}")
+         return None
+@@ -288,15 +427,10 @@
+ 
+             for rec in comps_records:
+                 case_num = rec.get("Case Number", "")
+-                case_num_str = str(case_num).strip() if case_num and not (isinstance(case_num, float) and math.isnan(case_num)) else ""
++                case_num_str = _normalise_case_number(case_num)
+ 
+                 price_elem_raw = rec.get("Pricing Element", "")
+-                price_elem_str = ""
+-                if price_elem_raw:
+-                    try:
+-                        price_elem_str = str(int(float(price_elem_raw))).zfill(2)
+-                    except (ValueError, TypeError):
+-                        price_elem_str = str(price_elem_raw).zfill(2)
++                price_elem_str = _normalise_pricing_element(price_elem_raw)
+ 
+                 j1_rate_float = get_j1_rate(pr_file, case_num_str, price_elem_str)
+                 comp_rate_float = rec.get("Comp Rate")
+diff -ruN /mnt/data/v015_baseline_for016/mod-automation-main/CHANGELOG.md /mnt/data/work_v0016/mod-automation-main/CHANGELOG.md
+--- /mnt/data/v015_baseline_for016/mod-automation-main/CHANGELOG.md	2026-06-10 02:10:23.000000000 +0000
++++ /mnt/data/work_v0016/mod-automation-main/CHANGELOG.md	2026-06-10 02:28:34.664849193 +0000
+@@ -4,6 +4,31 @@
+ 
+ Versioning note: this project is currently continuing the `v00.04.xxx` iteration line unless/until the base version is intentionally bumped.
+ 
++## v00.04.016 - F&R Comment Column and J.1 Rate Matching Fix
++
++### Fixed
++
++- Corrected `03_F_and_R_script.py` so the generated F&R workbook can copy Verizon/HHS comment text from accepted COMP-sheet header variants instead of requiring only the exact header `Verizon's Response/HHS Comment`.
++- Accepted comment variants now include forms such as `Verizon Response`, `Verizon's Response`, `Verizon's Reponse`, `Verizon Response/HHS Comment`, and `HHS Comment`.
++- When separate Verizon-response and HHS-comment columns are present, their nonblank values are combined into the generated F&R workbook's canonical `Verizon's Response/HHS Comment` column.
++- Improved J.1 price matching while preserving the business rule that J.1 headers are read from Row 1 only.
++- J.1 matching now tolerates Excel cell-type differences such as numeric case numbers versus text case numbers, SRE pricing element `1` versus `01`, and TO Period `OPT PD 5` versus `OPT PD 05`.
++- Updated `.xlsx` / `.xlsm` J.1 reads to use `data_only=True` so Excel-cached formula results in `HHS Price` can be read when available.
++- Added clearer diagnostic output when no J.1 match is found for a case/pricing/option-period combination.
++
++### Preserved
++
++- J.1 column headers are still expected on Row 1 of the PR file.
++- Required J.1 header names remain `Case Number`, `SRE Pricing Element`, `TO Period`, and `HHS Price`.
++- The F&R workbook still uses the canonical output header `Verizon's Response/HHS Comment`.
++- The Overview F&R logic from `v00.04.015` was not changed.
++
++### Validation
++
++- Confirmed `03_F_and_R_script.py` compiles with `python -m py_compile`.
++- Ran targeted tests confirming accepted Verizon/HHS comment header variants are copied into the canonical output field.
++- Ran targeted workbook tests confirming J.1 Row 1 headers are used and numeric/text value differences still match the correct `HHS Price`.
++
+ ## v00.04.015 - Overview Unknown F&R Status Handling
+ 
+ ### Fixed
+diff -ruN /mnt/data/v015_baseline_for016/mod-automation-main/CHANGELOG_v00.04.016.md /mnt/data/work_v0016/mod-automation-main/CHANGELOG_v00.04.016.md
+--- /mnt/data/v015_baseline_for016/mod-automation-main/CHANGELOG_v00.04.016.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v0016/mod-automation-main/CHANGELOG_v00.04.016.md	2026-06-10 02:28:34.666643498 +0000
+@@ -0,0 +1,337 @@
++# Changelog
++
++All notable changes for this project will be documented here.
++
++Versioning note: this project is currently continuing the `v00.04.xxx` iteration line unless/until the base version is intentionally bumped.
++
++## v00.04.016 - F&R Comment Column and J.1 Rate Matching Fix
++
++### Fixed
++
++- Corrected `03_F_and_R_script.py` so the generated F&R workbook can copy Verizon/HHS comment text from accepted COMP-sheet header variants instead of requiring only the exact header `Verizon's Response/HHS Comment`.
++- Accepted comment variants now include forms such as `Verizon Response`, `Verizon's Response`, `Verizon's Reponse`, `Verizon Response/HHS Comment`, and `HHS Comment`.
++- When separate Verizon-response and HHS-comment columns are present, their nonblank values are combined into the generated F&R workbook's canonical `Verizon's Response/HHS Comment` column.
++- Improved J.1 price matching while preserving the business rule that J.1 headers are read from Row 1 only.
++- J.1 matching now tolerates Excel cell-type differences such as numeric case numbers versus text case numbers, SRE pricing element `1` versus `01`, and TO Period `OPT PD 5` versus `OPT PD 05`.
++- Updated `.xlsx` / `.xlsm` J.1 reads to use `data_only=True` so Excel-cached formula results in `HHS Price` can be read when available.
++- Added clearer diagnostic output when no J.1 match is found for a case/pricing/option-period combination.
++
++### Preserved
++
++- J.1 column headers are still expected on Row 1 of the PR file.
++- Required J.1 header names remain `Case Number`, `SRE Pricing Element`, `TO Period`, and `HHS Price`.
++- The F&R workbook still uses the canonical output header `Verizon's Response/HHS Comment`.
++- The Overview F&R logic from `v00.04.015` was not changed.
++
++### Validation
++
++- Confirmed `03_F_and_R_script.py` compiles with `python -m py_compile`.
++- Ran targeted tests confirming accepted Verizon/HHS comment header variants are copied into the canonical output field.
++- Ran targeted workbook tests confirming J.1 Row 1 headers are used and numeric/text value differences still match the correct `HHS Price`.
++
++## v00.04.015 - Overview Unknown F&R Status Handling
++
++### Fixed
++
++- Corrected `02_overview_file_script.py` so unexpected nonblank `F&R Status` values, such as `?`, are no longer treated as a confirmed `No` in the generated Overview.
++- `F&R Needed` now stays blank when no in-scope `Pending` or `Approved` rows are found and at least one in-scope F&R status is blank or unknown.
++- The adjacent Overview F&R `# of CLINs` value is now also left blank whenever `F&R Needed` is blank.
++- Preserved the business rule that only `Pending` and `Approved` count as F&R items.
++- Preserved the explicit `N/A` / `NA` behavior: if all in-scope statuses are recognized non-F&R values, the Overview may still show `F&R Needed = No` and F&R count `0`.
++
++### Resulting Overview behavior
++
++| In-scope F&R Status values | F&R Needed | F&R count column |
++| --- | --- | --- |
++| Pending | Yes | Counted |
++| Approved | Yes | Counted |
++| N/A / NA only | No | 0 |
++| All blank | Blank | Blank |
++| Unknown values only, such as `?` | Blank | Blank |
++| Blank/unknown mixed with N/A, but no Pending/Approved | Blank | Blank |
++
++### Validation
++
++- Confirmed the updated Overview script compiles with `python -m py_compile`.
++- Ran targeted in-memory workbook tests confirming `?`, blank, `Pending`, `Approved`, and `N/A` scenarios.
++
++## v00.04.014 - Overview Blank F&R Status Handling
++
++### Fixed
++
++- Corrected `02_overview_file_script.py` so the generated Overview no longer defaults `F&R Needed` to `No` when every in-scope `F&R Status` cell is blank.
++- `F&R Needed` is now left blank when the scoped CLIN rows have no F&R status values at all.
++- Preserved the existing business rule that only `Pending` and `Approved` statuses produce `F&R Needed = Yes` and increment the numeric F&R count.
++- Preserved the OpDiv row-scope behavior: if OpDiv-approved rows exist, only those rows are evaluated; otherwise, all listed CLIN rows are evaluated.
++
++### Resulting Overview behavior
++
++| In-scope F&R Status values | F&R Needed | F&R count |
++| --- | --- | ---: |
++| All blank | Blank | 0 |
++| Pending | Yes | 1 per Pending row |
++| Approved | Yes | 1 per Approved row |
++| N/A / NA only | No | 0 |
++| Blank plus N/A / NA only | No | 0 |
++
++### Validation
++
++- Confirmed all Python files compile with `python -m py_compile`.
++- Ran targeted in-memory workbook tests confirming blank-only status rows leave `F&R Needed` blank while `Pending` and `Approved` still produce `Yes` and increment the count.
++
++## v00.04.013 - Overview F&R Needed Rule Alignment
++
++### Fixed
++
++- Corrected `02_overview_file_script.py` so `F&R Needed = Yes` is triggered only when an in-scope CLIN row has `F&R Status = Pending` or `F&R Status = Approved`.
++- Corrected the prior `v00.04.012` behavior where `N/A` / `NA` could still trigger `F&R Needed = Yes`.
++- Kept the numeric F&R count aligned to the same rule: only `Pending` and `Approved` are counted.
++- Preserved the CLIN-row scope behavior: if OpDiv-approved rows exist, evaluate only those rows; if none exist, evaluate all listed CLIN rows.
++
++### Clarified
++
++- `N/A`, `NA`, `N.A.`, and `Not Applicable` do not trigger `F&R Needed = Yes` and do not increment the F&R count.
++- `Pending` and `Approved` both trigger `F&R Needed = Yes` and both increment the F&R count.
++
++### Validation
++
++- Confirmed the updated overview script compiles with `python -m compileall`.
++- Ran targeted in-memory workbook tests confirming:
++  - `N/A` / `NA` alone produces `F&R Needed = No` and F&R count `0`.
++  - `Pending` and `Approved` produce `F&R Needed = Yes` and increment the F&R count.
++  - When OpDiv-approved rows exist, unapproved rows are excluded from both the flag and the count.
++
++## v00.04.012 - Overview F&R Count Business Rule Correction
++
++> Superseded by `v00.04.013` for the `F&R Needed` yes/no trigger. The current rule is that only `Pending` or `Approved` in-scope rows trigger `F&R Needed = Yes`.
++
++### Fixed
++
++- Corrected `02_overview_file_script.py` so the numeric Overview F&R item count includes only `Pending` and `Approved` F&R statuses.
++- Preserved the then-current `F&R Needed = Yes` trigger behavior for `Pending` and `N/A` / `NA` statuses. This was later corrected in `v00.04.013`.
++- Preserved the CLIN-row scope behavior from `v00.04.010` / `v00.04.011`: when OpDiv-approved rows exist, the Overview uses those rows; when none exist, it falls back to all listed CLIN rows.
++
++### Clarified
++
++- `v00.04.012` still allowed `N/A` / `NA` to make the Overview say `F&R Needed = Yes`; this was later corrected in `v00.04.013`.
++- `v00.04.012` counted `Approved` as an F&R item but did not use it by itself to trigger `F&R Needed = Yes`; this was later corrected in `v00.04.013`.
++
++### Validation
++
++- Confirmed the updated overview script compiles with `python -m py_compile`.
++- Ran targeted in-memory workbook tests confirming:
++  - `N/A` produced `F&R Needed = Yes` and F&R count `0` under the superseded `v00.04.012` rule.
++  - `Pending` produced `F&R Needed = Yes` and incremented the F&R count.
++  - `Approved` incremented the F&R count but did not by itself trigger `F&R Needed = Yes` under the superseded `v00.04.012` rule.
++
++## v00.04.011 - Overview F&R Count Alignment Fix
++
++### Fixed
++
++- Fixed `02_overview_file_script.py` so `F&R Needed = Yes` and the Overview F&R item count are calculated from the same CLIN row scope.
++- Included `N/A` / `NA` F&R statuses in the numeric F&R item count. Previously, `N/A` could trigger `F&R Needed = Yes` while still producing `# of CLINs = 0` in the F&R count column.
++- Preserved the approval-row behavior when one or more rows are marked `OpDiv Approval = Yes`.
++- Preserved the fallback-row behavior when no rows are marked with OpDiv approval: the script uses all listed CLIN rows instead of returning zero.
++- Added normalization for common N/A variants, including `N/A`, `NA`, `N.A.`, and `Not Applicable`.
++
++### Validation
++
++- Confirmed the updated overview script compiles with `python -m py_compile`.
++- Ran targeted in-memory workbook tests confirming that `F&R Needed = Yes` from an `N/A` status now produces a nonzero F&R count when that row is in scope.
++
++## v00.04.010 - Overview CLIN Count Fallback and F&R Determination Audit
++
++### Fixed
++
++- Fixed `02_overview_file_script.py` so `# of CLINs (Line items in current OP)` no longer reports `0` solely because no CLIN rows are marked `OpDiv Approval = Yes`.
++- Preserved the prior approval-based count when one or more rows are marked with OpDiv approval.
++- Added a fallback count that counts actual listed CLIN line items when no rows are marked with OpDiv approval.
++- Added the same fallback concept to the Overview `F&R Needed` result: when no OpDiv approval rows are marked, the script now looks at the listed CLIN rows' F&R statuses instead of automatically treating the PR as not needing F&R.
++- Limited the fallback count to rows that appear to be actual CLIN line items so blank formatted table rows are not treated as CLINs.
++
++### Clarified
++
++- Added `F_R_DETERMINATION_AUDIT.md` explaining how `03_F_and_R_script.py` decides which PRs get F&R workbook sheets.
++- Documented that the F&R workbook is driven by the generated Overview workbook's `F&R Needed` column, then by matching PR files and locating a `comp`/`comps` worksheet.
++- Documented common skip causes: Overview row not marked `F&R Needed = Yes`, PR file name not matching the PR number prefix, missing `comp` sheet, empty comp data, or PR grouping by PR number.
++
++### Validation
++
++- Confirmed the updated overview script compiles with `python -m py_compile`.
++- Ran targeted in-memory workbook tests confirming the CLIN fallback count works when no OpDiv approval rows are marked.
++
++## v00.04.009 - Controller Regression Audit and Preflight Fix
++
++### Fixed
++
++- Fixed controller preflight handling for fields that are outputs in an earlier step and inputs in a later step.
++- Full-workflow preflight now allows planned prior outputs, such as generated coversheets, overview workbook, build workbook, current J.1 workbook, and updated J.17 workbook, to be created during the run instead of incorrectly requiring them to exist before the workflow starts.
++- Individual step preflight now correctly requires those same prior-output paths to already exist when running that step by itself.
++- Restored the original J.17 expired-subscription default month behavior by defaulting the billing/current month to `December` unless the user overrides it in the UI or CLI.
++
++### Audited
++
++- Compared the original seven-script project against the controller UI package.
++- Confirmed all original processing scripts remain present.
++- Confirmed no original top-level processing functions were removed from the seven scripts.
++- Confirmed the controller delegates to the scripts rather than replacing their business logic.
++
++### Validation
++
++- Confirmed all Python files compile with `python -m py_compile`.
++- Confirmed the J.17 script exposes the restored `--current-month` default behavior through `--help`.
++
++## v00.04.008 - Controller UI Update
++
++### Added
++
++- Added `mod_automation_ui.py`, a Tkinter desktop controller for the full seven-step workflow.
++- Added file and folder selection fields for all core inputs:
++  - J.1 previous workbook
++  - CLIN lookup workbook
++  - PR files folder
++  - source build workbook/template
++  - source J.17 workbook
++  - billing detail workbook
++  - generated/approved coversheets folders
++  - generated output workbooks/documents
++- Added run metadata fields for:
++  - mod number
++  - current option period
++  - optional billing month
++  - Python executable path
++- Added default output path generation for a clean run folder structure.
++- Added a preflight check before individual-step and full-workflow runs.
++- Added live script output logging in the UI.
++- Added per-step status tracking: Pending, Running, Complete, Failed, and Skipped.
++- Added buttons to run a single step, run the full workflow, stop the active process, show the generated command, open the output folder, clear the log, and save the log.
++- Added save/load support for JSON workflow configuration files.
++- Added `RUN_UI.bat` as a Windows launcher.
++- Added `RUN_UI.command` as a macOS/Linux launcher.
++
++### Changed
++
++- Updated README documentation to make the controller UI the recommended way to run the workflow.
++- The workflow can now be facilitated from one screen instead of requiring users to run seven separate scripts manually.
++- Output locations are still flexible, but the UI now offers standard default output names and folders for consistency.
++
++### Validation
++
++- Confirmed `mod_automation_ui.py` compiles successfully.
++- Confirmed the UI delegates execution to the existing script CLI arguments added in `v00.04.007`.
++- Full end-to-end execution still requires the actual Excel/Word inputs used by the mod process.
++
++### Known limits
++
++- The UI validates required file/folder existence and output path readiness, but it does not yet validate workbook schemas, required sheets, or required columns before launching scripts.
++- The UI depends on Tkinter, which is included with most standard Python installations but may be missing from some restricted Python builds.
++- `xlwings` and Microsoft Excel are still required for workflow steps that rely on the original Excel COM behavior.
++
++## v00.04.007 - Path and Filename Flexibility Update
++
++### Added
++
++- Added `file_selection.py` as a shared helper for runtime file and folder selection.
++- Added file picker fallback support for required input files.
++- Added folder picker support for PR folders, coversheet folders, and output folders.
++- Added save-as picker support for generated output files.
++- Added command-line arguments to all seven workflow scripts.
++- Added broader Excel extension recognition for folder scanning where supported:
++  - `.xlsx`
++  - `.xlsm`
++  - `.xlsb`
++  - `.xls`
++- Added `.xlsb` read support for pandas-based reads through `pyxlsb`.
++- Added dynamic PR matching through shared helper logic.
++- Added `PATH_FLEXIBILITY_REPORT.md` documenting the hard-coded paths and filenames removed.
++- Added `path_flexibility.diff` showing the patch-level code changes.
++
++### Changed
++
++- Replaced the shared hard-coded local data root:
++
++  ```text
++  D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data
++  ```
++
++  with script-level selectable file and folder paths.
++
++- Updated `01_final_coversheet_generation_script.py` to accept selected paths for:
++  - J.1 previous workbook
++  - CLIN lookup workbook
++  - PR folder
++  - coversheet output folder
++  - current option period
++
++- Updated `02_overview_file_script.py` to accept selected paths for:
++  - coversheets folder
++  - optional CLIN lookup workbook
++  - overview output workbook
++
++- Updated `03_F_and_R_script.py` to accept selected paths for:
++  - overview workbook
++  - PR folder
++  - F&R output workbook
++  - current option period
++
++- Updated `04_build_file_script.py` to accept selected paths for:
++  - source build workbook/template
++  - approved coversheets folder
++  - PR folder
++  - build output workbook
++
++- Updated `05_J1_script.py` to accept selected paths for:
++  - build workbook
++  - J.1 previous workbook
++  - J.1 current output workbook
++  - current option period override
++
++- Updated `06_J17_file_script.py` to accept selected paths for:
++  - source J.17 workbook
++  - J.1 previous workbook
++  - J.1 current workbook
++  - billing detail workbook
++  - J.17 output workbook
++  - option period
++  - current month
++
++- Updated `07_MFR_walkthrough_script.py` to accept selected values for:
++  - J.1 current workbook
++  - Word document output path
++  - option period
++  - mod number
++
++### Fixed
++
++- Removed dependency on fixed file names such as:
++  - `j1_previous_file.xlsx`
++  - `clin_table_file.xls`
++  - `build_file.xlsx`
++  - `j17_file.xlsx`
++  - `overview_file.xlsx`
++  - `j1_current_file.xlsx`
++  - `j17_updated_file.xlsx`
++- Removed dependency on a specific EIS Billing Detail filename.
++- Removed fixed `P00078` from the MFR walkthrough script.
++- Replaced `.xlsx`-only folder discovery in patched paths with broader Excel file discovery.
++- Replaced the hard-coded build script CLIN sheet name `CLIN Table 2024.10.04` with dynamic CLIN Table sheet detection.
++- Updated J.1 categorization logic so it uses the selected/current option period instead of a fixed OP 5 / OP 6-11 split.
++- Added fallback console prompts for environments where Tkinter file dialogs cannot launch.
++
++### Validation
++
++- Confirmed all patched Python files compile.
++- Confirmed `--help` works for all seven workflow scripts.
++- Full end-to-end run validation remains pending because the code package did not include the actual source Excel/Word workbooks needed to execute the workflow.
++
++### Known limits
++
++- `xlwings` is still required where the original scripts rely on Excel COM behavior.
++- `openpyxl` cannot directly modify `.xlsb` workbooks; generated/modified outputs should generally be `.xlsx` or `.xlsm`.
++- The scripts still run independently; a consolidated controller UI is a recommended next improvement.
++- Preflight validation and schema enforcement are not yet fully implemented.
++- User-facing error handling is improved by path selection, but workbook-specific validation messages should still be expanded.
++
++## Earlier versions
++
++Earlier package history was not included in this ZIP. This changelog starts with the path and filename flexibility refactor.
+diff -ruN /mnt/data/v015_baseline_for016/mod-automation-main/F_R_SCRIPT_COMMENT_J1_AUDIT_v00.04.016.md /mnt/data/work_v0016/mod-automation-main/F_R_SCRIPT_COMMENT_J1_AUDIT_v00.04.016.md
+--- /mnt/data/v015_baseline_for016/mod-automation-main/F_R_SCRIPT_COMMENT_J1_AUDIT_v00.04.016.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v0016/mod-automation-main/F_R_SCRIPT_COMMENT_J1_AUDIT_v00.04.016.md	2026-06-10 02:28:34.665832854 +0000
+@@ -0,0 +1,60 @@
++# F&R Script Comment Column and J.1 Rate Matching Audit - v00.04.016
++
++## Scope
++
++This audit covers the `03_F_and_R_script.py` updates made after the `v00.04.015` Overview F&R status fixes. The Overview script was not changed in this iteration.
++
++## Issue 1: Verizon/HHS comment text was not copied consistently
++
++The prior F&R script only read one exact COMP-sheet column header:
++
++```text
++Verizon's Response/HHS Comment
++```
++
++If the PR file used a practical variant such as `Verizon Response`, `Verizon's Reponse`, `Verizon's Response`, or `HHS Comment`, the generated F&R workbook could leave the canonical response/comment field blank.
++
++## Fix
++
++The script now recognizes comment-column variants by normalizing header text and accepting headers that represent Verizon response and/or HHS comment fields. The generated F&R workbook still uses the canonical output header:
++
++```text
++Verizon's Response/HHS Comment
++```
++
++If separate Verizon and HHS comment columns are present in the COMP sheet, their nonblank row values are combined in the generated field.
++
++## Issue 2: J.1 prices were not always matched
++
++The J.1 lookup was too sensitive to Excel value formatting differences. For example, a COMP row could carry a case number or pricing element as text while the J.1 row carried it as a number. The old comparison could miss a real match.
++
++## Fix
++
++The J.1 lookup now normalizes values before comparing:
++
++- case numbers tolerate numeric-versus-text differences such as `123` and `123.0`;
++- SRE pricing elements tolerate `1` versus `01`;
++- TO Period tolerates `OPT PD 5` versus `OPT PD 05`;
++- currency parsing tolerates numeric values, `$` formatting, commas, and parentheses;
++- `.xlsx` and `.xlsm` reads use `data_only=True` so Excel-cached `HHS Price` formula values can be read when available.
++
++## Explicitly preserved behavior
++
++- J.1 headers are still read from Row 1 only.
++- The required J.1 headers remain:
++
++```text
++Case Number
++SRE Pricing Element
++TO Period
++HHS Price
++```
++
++- The script does not search for the J.1 header row elsewhere in the worksheet.
++- The generated F&R workbook continues to use `Verizon's Response/HHS Comment` as the output header.
++
++## Validation
++
++- `03_F_and_R_script.py` compiles successfully with `python -m py_compile`.
++- Targeted tests confirmed the accepted comment header variants copy into the canonical generated field.
++- Targeted workbook tests confirmed Row 1 J.1 headers are used and numeric/text formatting differences still match the correct J.1 `HHS Price`.
+diff -ruN /mnt/data/v015_baseline_for016/mod-automation-main/README.md /mnt/data/work_v0016/mod-automation-main/README.md
+--- /mnt/data/v015_baseline_for016/mod-automation-main/README.md	2026-06-10 02:10:23.000000000 +0000
++++ /mnt/data/work_v0016/mod-automation-main/README.md	2026-06-10 02:28:34.665524606 +0000
+@@ -38,6 +38,8 @@
+ | `REGRESSION_AUDIT.md` | Comparison notes confirming original script functions were preserved and documenting the controller preflight fix. |
+ | `OVERVIEW_FR_COUNT_AUDIT.md` | Documents the Overview F&R yes/no and numeric count rules. |
+ | `OVERVIEW_FR_BLANK_STATUS_AUDIT_v00.04.014.md` | Documents blank F&R Status handling for the Overview. |
++| `OVERVIEW_FR_STATUS_REVIEW_AUDIT_v00.04.015.md` | Documents unknown/suspicious F&R Status handling for the Overview. |
++| `F_R_SCRIPT_COMMENT_J1_AUDIT_v00.04.016.md` | Documents the F&R comment-column and J.1 price-matching fixes. |
+ 
+ ## Requirements
+ 
+@@ -74,6 +76,24 @@
+ 
+ This prevents blank or suspicious coversheet F&R statuses from being treated as confirmed `No` determinations. When the Overview leaves `F&R Needed` blank, it also leaves the adjacent F&R `# of CLINs` value blank so the row stands out for closer review.
+ 
++## Current F&R workbook extraction rule
++
++For the generated F&R workbook, `03_F_and_R_script.py` reads the generated Overview and processes rows where `F&R Needed = Yes`. For each PR, it finds the matching PR workbook, reads the COMP sheet, and creates the F&R Overview plus PR-specific tabs.
++
++The F&R output keeps the canonical column header `Verizon's Response/HHS Comment`, but the source COMP sheet may use variants. Accepted source comment headers now include:
++
++- `Verizon's Response/HHS Comment`
++- `Verizon Response/HHS Comment`
++- `Verizon's Response`
++- `Verizon Response`
++- `Verizon's Reponse`
++- `Verizon Reponse`
++- `HHS Comment`
++
++If separate Verizon-response and HHS-comment columns are present, the nonblank values are combined into the canonical output field.
++
++J.1 price matching still expects the J.1 headers on Row 1 of the PR file. The required Row 1 headers remain `Case Number`, `SRE Pricing Element`, `TO Period`, and `HHS Price`. Matching is now more tolerant of Excel value formatting differences, such as numeric case numbers versus text case numbers, pricing element `1` versus `01`, and `OPT PD 5` versus `OPT PD 05`.
++
+ ## Running the scripts
+ 
+ Each script supports two modes:
+diff -ruN /mnt/data/v015_baseline_for016/mod-automation-main/README_v00.04.016.md /mnt/data/work_v0016/mod-automation-main/README_v00.04.016.md
+--- /mnt/data/v015_baseline_for016/mod-automation-main/README_v00.04.016.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v0016/mod-automation-main/README_v00.04.016.md	2026-06-10 02:28:34.666296672 +0000
+@@ -0,0 +1,315 @@
++# Mod Automation Project
++
++This project automates the contract modification package workflow across coversheets, overview workbook, F&R workbook, build workbook, J.1 workbook, J.17 workbook, and MFR walkthrough output.
++
++This version removes the prior dependency on one local `D:\...\Data` folder and fixed input/output filenames. Scripts can now accept paths by command line or prompt the user to select files and folders through the file system.
++
++## What the project does
++
++The workflow is organized into seven scripts:
++
++1. **Generate coversheets** from the prior J.1 workbook, CLIN lookup workbook, and PR files.
++2. **Generate the overview workbook** from completed coversheets.
++3. **Generate the F&R workbook** from the overview workbook and PR files.
++4. **Generate the build workbook** from the source build workbook/template, approved coversheets, and PR files.
++5. **Generate the updated J.1 workbook** from the build workbook and prior J.1 workbook.
++6. **Generate the updated J.17 workbook** from J.17, prior/current J.1, and billing detail files.
++7. **Generate the MFR walkthrough document** from the updated J.1 workbook.
++
++The scripts are still independent, but they are intended to be run in sequence when producing a full modification package.
++
++## Project files
++
++| File | Purpose |
++| --- | --- |
++| `01_final_coversheet_generation_script.py` | Creates individual coversheet workbooks. |
++| `02_overview_file_script.py` | Builds the overview workbook from coversheets. |
++| `03_F_and_R_script.py` | Builds the F&R workbook and PR tabs. |
++| `04_build_file_script.py` | Builds the main build workbook from approved package materials. |
++| `05_J1_script.py` | Creates the current J.1 workbook from the build workbook and previous J.1. |
++| `06_J17_file_script.py` | Updates the J.17 workbook using J.1 and billing detail files. |
++| `07_MFR_walkthrough_script.py` | Generates the MFR walkthrough Word document. |
++| `file_selection.py` | Shared file/folder picker and Excel helper utilities. |
++| `mod_automation_ui.py` | Desktop controller UI for selecting inputs, running preflight checks, and launching the full workflow. |
++| `RUN_UI.bat` | Windows launcher for the controller UI. |
++| `RUN_UI.command` | macOS/Linux launcher for the controller UI. |
++| `PATH_FLEXIBILITY_REPORT.md` | Detailed report of removed hard-coded paths and filename assumptions. |
++| `path_flexibility.diff` | Patch diff showing the path/file-selection refactor. |
++| `REGRESSION_AUDIT.md` | Comparison notes confirming original script functions were preserved and documenting the controller preflight fix. |
++| `OVERVIEW_FR_COUNT_AUDIT.md` | Documents the Overview F&R yes/no and numeric count rules. |
++| `OVERVIEW_FR_BLANK_STATUS_AUDIT_v00.04.014.md` | Documents blank F&R Status handling for the Overview. |
++| `OVERVIEW_FR_STATUS_REVIEW_AUDIT_v00.04.015.md` | Documents unknown/suspicious F&R Status handling for the Overview. |
++| `F_R_SCRIPT_COMMENT_J1_AUDIT_v00.04.016.md` | Documents the F&R comment-column and J.1 price-matching fixes. |
++
++## Requirements
++
++Use Python 3.10+ if possible.
++
++Install the project dependencies:
++
++```bash
++pip install pandas numpy openpyxl xlwings python-docx pyxlsb
++```
++
++Notes:
++
++- `xlwings` requires Microsoft Excel on the machine where the relevant scripts run.
++- `.xlsb` files can be read through `pyxlsb` in the patched pandas paths.
++- Workbooks modified directly through `openpyxl` should still be saved as `.xlsx` or `.xlsm`; `openpyxl` cannot directly modify `.xlsb` files.
++- File picker dialogs use Tkinter. If a dialog cannot open, the helper falls back to console prompts.
++
++
++## Current Overview F&R Status rule
++
++For the generated Overview workbook, `02_overview_file_script.py` evaluates the in-scope rows from `CLIN Table (Current OP)`. If one or more rows are marked with OpDiv approval, only those approved rows are evaluated. If no rows are marked with OpDiv approval, all listed CLIN rows are evaluated.
++
++The current F&R behavior is:
++
++| In-scope F&R Status values | Overview `F&R Needed` | Overview F&R count column |
++| --- | --- | --- |
++| `Pending` | `Yes` | Counted |
++| `Approved` | `Yes` | Counted |
++| `N/A`, `NA`, `N.A.`, or `Not Applicable` only | `No` | `0` |
++| All blank | Blank | Blank |
++| Unknown/unexpected values only, such as `?` | Blank | Blank |
++| Blank or unknown values mixed with `N/A`, but no `Pending`/`Approved` | Blank | Blank |
++
++This prevents blank or suspicious coversheet F&R statuses from being treated as confirmed `No` determinations. When the Overview leaves `F&R Needed` blank, it also leaves the adjacent F&R `# of CLINs` value blank so the row stands out for closer review.
++
++## Current F&R workbook extraction rule
++
++For the generated F&R workbook, `03_F_and_R_script.py` reads the generated Overview and processes rows where `F&R Needed = Yes`. For each PR, it finds the matching PR workbook, reads the COMP sheet, and creates the F&R Overview plus PR-specific tabs.
++
++The F&R output keeps the canonical column header `Verizon's Response/HHS Comment`, but the source COMP sheet may use variants. Accepted source comment headers now include:
++
++- `Verizon's Response/HHS Comment`
++- `Verizon Response/HHS Comment`
++- `Verizon's Response`
++- `Verizon Response`
++- `Verizon's Reponse`
++- `Verizon Reponse`
++- `HHS Comment`
++
++If separate Verizon-response and HHS-comment columns are present, the nonblank values are combined into the canonical output field.
++
++J.1 price matching still expects the J.1 headers on Row 1 of the PR file. The required Row 1 headers remain `Case Number`, `SRE Pricing Element`, `TO Period`, and `HHS Price`. Matching is now more tolerant of Excel value formatting differences, such as numeric case numbers versus text case numbers, pricing element `1` versus `01`, and `OPT PD 5` versus `OPT PD 05`.
++
++## Running the scripts
++
++Each script supports two modes:
++
++1. **Interactive file selection:** run the script without path arguments and select files/folders when prompted.
++2. **CLI-driven execution:** pass file and folder paths as arguments for repeatable runs.
++
++You can view available options for any script with:
++
++```bash
++python script_name.py --help
++```
++
++## Running the controller UI
++
++The recommended way to run the workflow is now through the controller UI:
++
++```bash
++python mod_automation_ui.py
++```
++
++On Windows, users can also double-click:
++
++```text
++RUN_UI.bat
++```
++
++The UI lets a user select the files and folders needed for the full package process, set the mod number and option period, generate default output names, run preflight checks, run one step at a time, or run the full seven-step workflow. It streams each script's output into a live log and tracks step status as Pending, Running, Complete, Failed, or Skipped.
++
++### UI workflow
++
++1. Open `mod_automation_ui.py` or run `RUN_UI.bat`.
++2. On the **Setup** tab, select the required source files and folders.
++3. Enter the mod number, current option period, and billing month if needed. The billing month defaults to `December` to match the original J.17 script behavior; change it when processing a different cycle.
++4. Select or create the run output folder.
++5. Click **Set default output names** to create standard output paths for the run.
++6. Click **Preflight all steps** to check for missing files and folders. The controller understands that some files are created by earlier steps and then consumed by later steps during a full workflow run.
++7. Use **Run full workflow** or run individual steps from the **Run Workflow** tab.
++8. Review the **Log** tab for script output and errors.
++
++### UI-managed outputs
++
++By default, the controller creates a clean run structure under the selected output folder:
++
++```text
++run-output/
++  01_generated_coversheets/
++  02_overview/overview_file.xlsx
++  03_f_and_r/f_r_output.xlsx
++  04_build/build_file.xlsx
++  05_j1/j1_current_file.xlsx
++  06_j17/j17_updated_file.xlsx
++  07_mfr/<MOD> MFR Walkthrough Output.docx
++```
++
++The defaults are only suggestions. Every output path remains editable in the UI.
++
++### UI configuration
++
++The controller can save and reload a JSON configuration file so repeated runs do not require users to re-select every input. When a full workflow completes, the UI also saves `mod_automation_ui_config.json` in the project folder as the most recent configuration.
++
++## Typical full workflow
++
++### 1. Generate coversheets
++
++```bash
++python 01_final_coversheet_generation_script.py \
++  --j1-previous-file "path/to/J1 previous.xlsx" \
++  --clin-table-file "path/to/CLIN lookup.xls" \
++  --pr-dir "path/to/PR files" \
++  --output-dir "path/to/output/coversheets" \
++  --current-op 5
++```
++
++### 2. Generate overview workbook
++
++```bash
++python 02_overview_file_script.py \
++  --coversheets-dir "path/to/output/coversheets" \
++  --clin-table-file "path/to/CLIN lookup.xls" \
++  --output-file "path/to/overview_file.xlsx"
++```
++
++The CLIN table file is optional for this step. If skipped, the script can still run and leave Services blank.
++
++### 3. Generate F&R workbook
++
++```bash
++python 03_F_and_R_script.py \
++  --overview-file "path/to/overview_file.xlsx" \
++  --pr-dir "path/to/PR files" \
++  --output-file "path/to/f_r_output.xlsx" \
++  --current-option-period 5
++```
++
++### 4. Generate build workbook
++
++```bash
++python 04_build_file_script.py \
++  --build-file "path/to/source build.xlsx" \
++  --coversheets-dir "path/to/approved coversheets" \
++  --pr-dir "path/to/PR files" \
++  --output-file "path/to/build_file.xlsx"
++```
++
++The script now looks for a CLIN Table sheet dynamically instead of requiring a date-stamped sheet name.
++
++### 5. Generate current J.1 workbook
++
++```bash
++python 05_J1_script.py \
++  --build-file "path/to/build_file.xlsx" \
++  --j1-previous-file "path/to/J1 previous.xlsx" \
++  --output-file "path/to/j1_current_file.xlsx" \
++  --current-opt-pd 5
++```
++
++If `--current-opt-pd` is omitted, the script calculates the current option period by date.
++
++### 6. Generate updated J.17 workbook
++
++```bash
++python 06_J17_file_script.py \
++  --j17-file "path/to/J17 source.xlsx" \
++  --j1-previous-file "path/to/J1 previous.xlsx" \
++  --j1-current-file "path/to/j1_current_file.xlsx" \
++  --billing-file "path/to/EIS Billing Detail.xlsx" \
++  --output-file "path/to/j17_updated_file.xlsx" \
++  --option-period 5 \
++  --current-month March
++```
++
++If `--current-month` is omitted, the script attempts to infer the month from the billing filename.
++
++### 7. Generate MFR walkthrough document
++
++```bash
++python 07_MFR_walkthrough_script.py \
++  --j1-current-file "path/to/j1_current_file.xlsx" \
++  --output-file "path/to/P00078 MFR Walkthrough Output.docx" \
++  --option-period 5 \
++  --mod-number P00078
++```
++
++## Accepted Excel file types
++
++The shared helper recognizes these Excel extensions where the script logic supports them:
++
++- `.xlsx`
++- `.xlsm`
++- `.xlsb`
++- `.xls`
++
++Important distinction: some inputs can be read from broader Excel formats, but generated or modified workbooks should generally be saved as `.xlsx` or `.xlsm`.
++
++## Path and filename flexibility added in this version
++
++The following assumptions were removed or reduced:
++
++- One fixed local data folder.
++- Fixed `input/`, `output/`, `coversheets/`, and `pr_files/` locations.
++- Fixed input names such as `j1_previous_file.xlsx`, `clin_table_file.xls`, `build_file.xlsx`, and `j17_file.xlsx`.
++- Fixed billing detail filename.
++- Fixed output names such as `overview_file.xlsx`, `build_file.xlsx`, `j1_current_file.xlsx`, and `j17_updated_file.xlsx`.
++- Fixed MFR mod number `P00078`.
++- `.xlsx`-only folder discovery in places that can support additional Excel formats.
++- Date-stamped CLIN Table sheet name assumption in the build script.
++
++## Recommended folder organization
++
++The scripts no longer require this exact layout, but this structure is still useful for clean runs:
++
++```text
++mod-package-run/
++  inputs/
++    J1 previous.xlsx
++    CLIN lookup.xls
++    source build.xlsx
++    J17 source.xlsx
++    EIS Billing Detail.xlsx
++  pr_files/
++    *.xlsx / *.xlsm / *.xlsb / *.xls
++  coversheets/
++  approved_coversheets/
++  outputs/
++```
++
++## Validation performed for this package
++
++The patched scripts were checked with Python compilation and `--help` execution. Full workflow validation still requires the actual Excel and Word inputs used by the mod process.
++
++## Known limits / next improvements
++
++Recommended next improvements:
++
++- Expand workbook-level preflight validation before each script runs.
++- Add a schema layer for required sheets/columns in each workbook.
++- Add more workbook-specific user-facing error messages that explain what file/sheet/column failed.
++## F&R workbook inclusion logic
++
++The F&R workbook is not currently generated by scanning every coversheet directly. It is driven by the generated Overview workbook.
++
++A PR is selected for F&R workbook processing when all of these are true:
++
++1. The Overview workbook contains a row where `F&R Needed` is `Yes`.
++2. The PR files folder contains an Excel file whose filename starts with the PR identifier, such as `PR59483...`.
++3. That PR workbook contains a worksheet whose name includes `comp`, such as `Comps` or `COMP`.
++4. The comp worksheet contains rows that the script can extract into F&R records.
++
++The Overview script determines `F&R Needed` from the `CLIN Table (Current OP)` sheet. In `v00.04.010`, if no CLIN rows are marked with OpDiv approval, the Overview script now falls back to the listed CLIN rows and their F&R statuses instead of automatically producing zero CLINs / no F&R need. In `v00.04.011`, the F&R yes/no flag and F&R count were aligned to use the same row scope. In `v00.04.012`, the numeric F&R count was corrected to include only `Pending` and `Approved` statuses. In `v00.04.013`, the `F&R Needed` flag was aligned to that same business rule: only `Pending` or `Approved` in-scope rows trigger `F&R Needed = Yes`; `N/A` / `NA` does not trigger the flag and does not count as an F&R item.
++
++Common reasons a PR may not receive an F&R tab:
++
++- The Overview row is not marked `F&R Needed = Yes`.
++- The PR workbook filename does not start with the PR number format expected by the script.
++- The PR workbook does not have a sheet with `comp` in the sheet name.
++- The comp sheet is empty or missing expected columns.
++- Multiple files/versions exist for the same PR; the current script groups tabs primarily by PR number.
++

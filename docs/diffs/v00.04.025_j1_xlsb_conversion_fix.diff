@@ -1,0 +1,146 @@
+--- /mnt/data/j1orig/mod-automation-main/05_J1_script.py	2026-06-10 04:00:10.000000000 +0000
++++ /mnt/data/j1fix/mod-automation-main/05_J1_script.py	2026-06-10 04:47:59.915864454 +0000
+@@ -1,8 +1,13 @@
+ """
+ J1 Current File Automation
++
+ This script reads from the Catalog sheet in the Build file and appends entries
+ to the appropriate sheets in the J1 file based on TO Period.
+-It copies the original j1_previous_file from input/ to output/ as j1_current_file before modifying.
++
++The selected previous J.1 workbook is copied/converted to an .xlsx output
++workbook before modification. Binary .xlsb/.xls baselines cannot simply be
++renamed to .xlsx; when one is selected, the script attempts a real Excel
++conversion before using openpyxl to append rows.
+ """
+ 
+ import pandas as pd
+@@ -436,6 +441,102 @@
+     return current_price_id
+ 
+ 
++
++def _force_xlsx_output_path(path):
++    """Ensure the J.1 output path is an .xlsx workbook path."""
++    path = Path(path)
++    if path.suffix.lower() != ".xlsx":
++        corrected = path.with_suffix(".xlsx")
++        print(f"Warning: J.1 output must be .xlsx for automated updates; using {corrected}")
++        return corrected
++    return path
++
++
++def _convert_with_excel_com(source_path, output_path):
++    """
++    Convert .xlsb/.xls source workbook to .xlsx using desktop Excel.
++
++    openpyxl cannot read or write .xlsb workbooks. On Windows workstations with
++    Excel installed, pywin32 can drive Excel's own SaveAs conversion so the
++    existing workbook structure is preserved before rows are appended.
++    """
++    source_path = Path(source_path)
++    output_path = Path(output_path)
++
++    try:
++        import win32com.client as win32
++    except Exception as exc:
++        raise RuntimeError(
++            "The selected previous J.1 workbook is .xlsb/.xls, which must be "
++            "converted to .xlsx before the automation can append rows. Install "
++            "pywin32 and run this step on a Windows machine with Microsoft Excel, "
++            "or manually open the previous J.1 workbook in Excel, Save As .xlsx, "
++            "and rerun Step 5 using that .xlsx file."
++        ) from exc
++
++    excel = None
++    workbook = None
++    try:
++        excel = win32.gencache.EnsureDispatch("Excel.Application")
++        excel.DisplayAlerts = False
++        excel.Visible = False
++
++        output_path.parent.mkdir(parents=True, exist_ok=True)
++        if output_path.exists():
++            output_path.unlink()
++
++        workbook = excel.Workbooks.Open(str(source_path.resolve()), ReadOnly=True)
++        # Excel FileFormat 51 = xlOpenXMLWorkbook (.xlsx)
++        workbook.SaveAs(str(output_path.resolve()), FileFormat=51)
++    finally:
++        if workbook is not None:
++            workbook.Close(SaveChanges=False)
++        if excel is not None:
++            excel.DisplayAlerts = True
++            excel.Quit()
++
++    if not output_path.exists():
++        raise RuntimeError(f"Excel conversion did not create expected output: {output_path}")
++
++
++def prepare_j1_current_workbook(previous_path, output_path):
++    """
++    Create an editable .xlsx current J.1 workbook from the selected prior J.1.
++
++    .xlsx/.xlsm inputs can be copied directly because openpyxl can read the
++    workbook package. .xlsb/.xls inputs require a real conversion instead of a
++    byte-for-byte copy because renaming an .xlsb file to .xlsx creates the
++    'File contains no valid workbook part' error seen in Step 5.
++    """
++    previous_path = Path(previous_path)
++    output_path = _force_xlsx_output_path(output_path)
++
++    if not previous_path.exists():
++        raise FileNotFoundError(f"J1 previous file not found at {previous_path}")
++
++    suffix = previous_path.suffix.lower()
++    if suffix in {".xlsx", ".xlsm"}:
++        shutil.copy2(previous_path, output_path)
++        print(f"Copied J1 previous file to: {output_path}")
++    elif suffix in {".xlsb", ".xls"}:
++        print(f"Converting J1 previous file from {suffix} to .xlsx: {output_path}")
++        _convert_with_excel_com(previous_path, output_path)
++        print(f"Converted J1 previous file to: {output_path}")
++    else:
++        raise ValueError(f"Unsupported J.1 previous file type: {previous_path.suffix}")
++
++    # Validate the output before later steps attempt to append rows.
++    try:
++        wb = load_workbook(output_path, read_only=True)
++        wb.close()
++    except Exception as exc:
++        raise RuntimeError(
++            f"The prepared J.1 output workbook is not a valid .xlsx file: {output_path}. "
++            "If the source file was .xlsb/.xls, confirm it was converted rather than renamed."
++        ) from exc
++
++    return output_path
++
+ # ============================================================
+ # MAIN EXECUTION
+ # ============================================================
+@@ -458,6 +559,7 @@
+     build_file = choose_existing_file(args.build_file, "Select the build workbook with the Catalog sheet", EXCEL_FILETYPES)
+     j1_previous_file_input = choose_existing_file(args.j1_previous_file, "Select the J.1 previous workbook", EXCEL_FILETYPES)
+     j1_current_file = choose_save_file(args.output_file, "Save the updated/current J.1 workbook as", "j1_current_file.xlsx", EXCEL_FILETYPES)
++    j1_current_file = _force_xlsx_output_path(j1_current_file)
+ 
+ 
+ def main(argv=None):
+@@ -466,12 +568,12 @@
+     configure_paths(args)
+     j1_current_file.parent.mkdir(parents=True, exist_ok=True)
+ 
+-    # Copy the selected J.1 previous file before modifying.
+-    if not j1_previous_file_input.exists():
+-        print(f"Error: J1 previous file not found at {j1_previous_file_input}")
++    # Copy or convert the selected J.1 previous file before modifying.
++    try:
++        j1_current_file = prepare_j1_current_workbook(j1_previous_file_input, j1_current_file)
++    except Exception as exc:
++        print(f"Error preparing J1 current workbook: {exc}")
+         return
+-    shutil.copy2(j1_previous_file_input, j1_current_file)
+-    print(f"Copied J1 previous file to: {j1_current_file}")
+ 
+     print("=" * 60)
+     print("J1 PREVIOUS FILE AUTOMATION")

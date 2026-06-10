@@ -1,0 +1,56 @@
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local workflow outputs and generated run folders
+runs/
+output/
+outputs/
+logs/
+temp/
+tmp/
+Auto*Output*/
+
+# Local configuration / selected-path state
+*.local.json
+*.user.json
+ui_config.json
+config.local.json
+
+# Real input/output workbooks and documents should not be committed by default
+*.xlsx
+*.xlsm
+*.xlsb
+*.xls
+*.docx
+*.docm
+*.pdf
+
+# Allow documentation/sample-free project files if intentionally added later
+!docs/**/*.md
+!README.md
+!CHANGELOG.md
+!GITHUB_UPLOAD_GUIDE.md

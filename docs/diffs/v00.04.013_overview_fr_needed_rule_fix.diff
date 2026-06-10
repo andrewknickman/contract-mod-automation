@@ -1,0 +1,199 @@
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' v012_baseline/mod-automation-main/02_overview_file_script.py work_v013/mod-automation-main/02_overview_file_script.py
+--- v012_baseline/mod-automation-main/02_overview_file_script.py	2026-06-10 01:44:18.000000000 +0000
++++ work_v013/mod-automation-main/02_overview_file_script.py	2026-06-10 01:46:24.667506271 +0000
+@@ -349,19 +349,20 @@
+ 
+ 
+ def _is_fr_required_status(value) -> bool:
+-    """Statuses that make the PR need an F&R workbook entry."""
+-    return _normalise_status_value(value) in {"pending", "n/a"}
++    """Statuses that make the PR need an F&R workbook entry.
+ 
+-
+-def _is_fr_count_status(value) -> bool:
+-    """Statuses included in the Overview numeric F&R item count.
+-
+-    Business rule: count only Pending and Approved items. N/A can still make
+-    F&R Needed = Yes, but it is not itself counted as an F&R item.
++    Business rule: F&R Needed = Yes only when at least one scoped CLIN row has
++    F&R Status of Pending or Approved. N/A/NA does not trigger F&R Needed and
++    does not contribute to the numeric F&R count.
+     """
+     return _normalise_status_value(value) in {"pending", "approved"}
+ 
+ 
++def _is_fr_count_status(value) -> bool:
++    """Statuses included in the Overview numeric F&R item count."""
++    return _is_fr_required_status(value)
++
++
+ def _row_has_clin_item(sheet, row: int, headers: Dict[str, int], clin_col: Optional[int]) -> bool:
+     """
+     Determine whether a CLIN table row represents an actual line item.
+@@ -454,9 +455,9 @@
+     rows_for_counts = approved_rows if approved_rows else clin_rows
+     results['clin_count'] = len(rows_for_counts)
+ 
+-    # Use the same row scope for both the Yes/No flag and the numeric F&R count.
+-    # Important business distinction: N/A can trigger F&R Needed = Yes, but the
+-    # numeric F&R count includes only Pending and Approved items.
++    # Use the same row scope and the same status rule for both the Yes/No flag
++    # and the numeric F&R count. Only Pending and Approved count. N/A/NA does
++    # not trigger F&R Needed and does not contribute to the F&R count.
+     results['fr_needed'] = 'Yes' if any(
+         _is_fr_required_status(row["fr_value"]) for row in rows_for_counts
+     ) else 'No'
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' v012_baseline/mod-automation-main/CHANGELOG.md work_v013/mod-automation-main/CHANGELOG.md
+--- v012_baseline/mod-automation-main/CHANGELOG.md	2026-06-10 01:45:00.000000000 +0000
++++ work_v013/mod-automation-main/CHANGELOG.md	2026-06-10 01:47:14.291968897 +0000
+@@ -4,26 +4,50 @@
+ 
+ Versioning note: this project is currently continuing the `v00.04.xxx` iteration line unless/until the base version is intentionally bumped.
+ 
++## v00.04.013 - Overview F&R Needed Rule Alignment
++
++### Fixed
++
++- Corrected `02_overview_file_script.py` so `F&R Needed = Yes` is triggered only when an in-scope CLIN row has `F&R Status = Pending` or `F&R Status = Approved`.
++- Corrected the prior `v00.04.012` behavior where `N/A` / `NA` could still trigger `F&R Needed = Yes`.
++- Kept the numeric F&R count aligned to the same rule: only `Pending` and `Approved` are counted.
++- Preserved the CLIN-row scope behavior: if OpDiv-approved rows exist, evaluate only those rows; if none exist, evaluate all listed CLIN rows.
++
++### Clarified
++
++- `N/A`, `NA`, `N.A.`, and `Not Applicable` do not trigger `F&R Needed = Yes` and do not increment the F&R count.
++- `Pending` and `Approved` both trigger `F&R Needed = Yes` and both increment the F&R count.
++
++### Validation
++
++- Confirmed the updated overview script compiles with `python -m compileall`.
++- Ran targeted in-memory workbook tests confirming:
++  - `N/A` / `NA` alone produces `F&R Needed = No` and F&R count `0`.
++  - `Pending` and `Approved` produce `F&R Needed = Yes` and increment the F&R count.
++  - When OpDiv-approved rows exist, unapproved rows are excluded from both the flag and the count.
++
+ ## v00.04.012 - Overview F&R Count Business Rule Correction
+ 
++> Superseded by `v00.04.013` for the `F&R Needed` yes/no trigger. The current rule is that only `Pending` or `Approved` in-scope rows trigger `F&R Needed = Yes`.
++
+ ### Fixed
+ 
+ - Corrected `02_overview_file_script.py` so the numeric Overview F&R item count includes only `Pending` and `Approved` F&R statuses.
+-- Preserved the separate `F&R Needed = Yes` trigger behavior for `Pending` and `N/A` / `NA` statuses.
++- Preserved the then-current `F&R Needed = Yes` trigger behavior for `Pending` and `N/A` / `NA` statuses. This was later corrected in `v00.04.013`.
+ - Preserved the CLIN-row scope behavior from `v00.04.010` / `v00.04.011`: when OpDiv-approved rows exist, the Overview uses those rows; when none exist, it falls back to all listed CLIN rows.
+ 
+ ### Clarified
+ 
+-- `N/A` / `NA` can still make the Overview say `F&R Needed = Yes`, because the item still needs attention, but it is not counted as an F&R item.
+-- `Approved` can be counted as an F&R item, but it does not by itself make `F&R Needed = Yes` because it is already approved.
++- `v00.04.012` still allowed `N/A` / `NA` to make the Overview say `F&R Needed = Yes`; this was later corrected in `v00.04.013`.
++- `v00.04.012` counted `Approved` as an F&R item but did not use it by itself to trigger `F&R Needed = Yes`; this was later corrected in `v00.04.013`.
+ 
+ ### Validation
+ 
+ - Confirmed the updated overview script compiles with `python -m py_compile`.
+ - Ran targeted in-memory workbook tests confirming:
+-  - `N/A` produces `F&R Needed = Yes` and F&R count `0`.
+-  - `Pending` produces `F&R Needed = Yes` and increments the F&R count.
+-  - `Approved` increments the F&R count but does not by itself trigger `F&R Needed = Yes`.
++  - `N/A` produced `F&R Needed = Yes` and F&R count `0` under the superseded `v00.04.012` rule.
++  - `Pending` produced `F&R Needed = Yes` and incremented the F&R count.
++  - `Approved` incremented the F&R count but did not by itself trigger `F&R Needed = Yes` under the superseded `v00.04.012` rule.
+ 
+ ## v00.04.011 - Overview F&R Count Alignment Fix
+ 
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' v012_baseline/mod-automation-main/OVERVIEW_FR_COUNT_AUDIT.md work_v013/mod-automation-main/OVERVIEW_FR_COUNT_AUDIT.md
+--- v012_baseline/mod-automation-main/OVERVIEW_FR_COUNT_AUDIT.md	2026-06-10 01:45:00.000000000 +0000
++++ work_v013/mod-automation-main/OVERVIEW_FR_COUNT_AUDIT.md	2026-06-10 01:46:59.239022545 +0000
+@@ -1,49 +1,47 @@
+-# Overview F&R Count Audit
++# Overview F&R Count and F&R Needed Audit
+ 
+-## Issue
++## Corrected rule in v00.04.013
+ 
+-The Overview step had two related problems across the `v00.04.010` / `v00.04.011` fixes:
++`02_overview_file_script.py` now applies one consistent business rule for both the Overview `F&R Needed` flag and the numeric F&R count.
+ 
+-1. The script needed to evaluate F&R status from the correct CLIN row scope.
+-   - If one or more CLIN rows are marked `OpDiv Approval = Yes`, use those approved rows.
+-   - If no CLIN rows are marked with OpDiv approval, fall back to all listed CLIN rows.
++## Row scope
+ 
+-2. The numeric F&R count was briefly expanded too far in `v00.04.011`.
+-   - `N/A` / `NA` can mean the PR still needs F&R attention.
+-   - But `N/A` / `NA` should not be counted as an F&R item.
++- If any CLIN rows are marked `OpDiv Approval = Yes`, the script evaluates those approved rows only.
++- If no CLIN rows are marked `OpDiv Approval = Yes`, the script falls back to all listed CLIN rows in `CLIN Table (Current OP)`.
+ 
+-## Corrected rule in v00.04.012
++## F&R status rule
+ 
+-`02_overview_file_script.py` now applies these rules:
+-
+-### Row scope
+-
+-- If any rows are marked `OpDiv Approval = Yes`, both the `F&R Needed` flag and numeric F&R count evaluate those approved rows only.
+-- If no rows are marked `OpDiv Approval = Yes`, both values evaluate all listed CLIN rows.
+-
+-### F&R Needed flag
+-
+-The Overview writes `F&R Needed = Yes` when an in-scope row has one of these F&R statuses:
++Only these in-scope F&R statuses trigger `F&R Needed = Yes`:
+ 
+ - `Pending`
+-- `N/A` / `NA` / common N/A variants
+-
+-`Approved` alone does not make `F&R Needed = Yes`, because it is already approved.
+-
+-### Numeric F&R item count
++- `Approved`
+ 
+-The numeric F&R count includes only these statuses:
++Only these in-scope F&R statuses increment the numeric F&R count:
+ 
+ - `Pending`
+ - `Approved`
+ 
+-`N/A` / `NA` does not increment the F&R count.
++The following statuses do not trigger `F&R Needed = Yes` and do not increment the F&R count:
++
++- `N/A`
++- `NA`
++- `N.A.`
++- `Not Applicable`
++- Blank values
++
++## Practical examples
++
++| In-scope F&R statuses | F&R Needed | F&R count |
++|---|---:|---:|
++| `N/A`, `NA` | `No` | `0` |
++| `Pending` | `Yes` | `1` |
++| `Approved` | `Yes` | `1` |
++| `Pending`, `Approved`, `N/A` | `Yes` | `2` |
+ 
+ ## Validation
+ 
+ Targeted in-memory workbook tests confirmed:
+ 
+-1. A coversheet with no OpDiv approval rows and one `N/A` F&R status produces `F&R Needed = Yes` and F&R count `0`.
+-2. A coversheet with no OpDiv approval rows and statuses `Pending`, `N/A`, and `Approved` produces `F&R Needed = Yes` and F&R count `2`.
+-3. A coversheet with only `Approved` produces `F&R Needed = No` and F&R count `1`.
+-4. When approved rows exist, non-approved rows are excluded from both the flag and the count.
++1. A coversheet with no OpDiv approval rows and only `N/A` / `NA` F&R statuses produces `F&R Needed = No` and F&R count `0`.
++2. A coversheet with no OpDiv approval rows and statuses `Pending`, `Approved`, and `N/A` produces `F&R Needed = Yes` and F&R count `2`.
++3. When approved rows exist, non-approved rows are excluded from both the flag and the count.
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' v012_baseline/mod-automation-main/README.md work_v013/mod-automation-main/README.md
+--- v012_baseline/mod-automation-main/README.md	2026-06-10 01:45:00.000000000 +0000
++++ work_v013/mod-automation-main/README.md	2026-06-10 01:46:59.238716717 +0000
+@@ -264,7 +264,7 @@
+ 3. That PR workbook contains a worksheet whose name includes `comp`, such as `Comps` or `COMP`.
+ 4. The comp worksheet contains rows that the script can extract into F&R records.
+ 
+-The Overview script determines `F&R Needed` from the `CLIN Table (Current OP)` sheet. In `v00.04.010`, if no CLIN rows are marked with OpDiv approval, the Overview script now falls back to the listed CLIN rows and their F&R statuses instead of automatically producing zero CLINs / no F&R need. In `v00.04.011`, the F&R yes/no flag and F&R count were aligned to use the same row scope. In `v00.04.012`, the numeric F&R count was corrected to include only `Pending` and `Approved` statuses. `N/A` / `NA` can still trigger `F&R Needed = Yes`, but it is not counted as an F&R item.
++The Overview script determines `F&R Needed` from the `CLIN Table (Current OP)` sheet. In `v00.04.010`, if no CLIN rows are marked with OpDiv approval, the Overview script now falls back to the listed CLIN rows and their F&R statuses instead of automatically producing zero CLINs / no F&R need. In `v00.04.011`, the F&R yes/no flag and F&R count were aligned to use the same row scope. In `v00.04.012`, the numeric F&R count was corrected to include only `Pending` and `Approved` statuses. In `v00.04.013`, the `F&R Needed` flag was aligned to that same business rule: only `Pending` or `Approved` in-scope rows trigger `F&R Needed = Yes`; `N/A` / `NA` does not trigger the flag and does not count as an F&R item.
+ 
+ Common reasons a PR may not receive an F&R tab:
+ 

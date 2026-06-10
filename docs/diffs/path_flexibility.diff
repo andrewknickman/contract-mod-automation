@@ -1,0 +1,912 @@
+diff -ru /mnt/data/mod_project_original/mod-automation-main/01_final_coversheet_generation_script.py /mnt/data/mod_project_work/mod-automation-main/01_final_coversheet_generation_script.py
+--- /mnt/data/mod_project_original/mod-automation-main/01_final_coversheet_generation_script.py	2026-06-09 18:17:14.000000000 +0000
++++ /mnt/data/mod_project_work/mod-automation-main/01_final_coversheet_generation_script.py	2026-06-10 00:37:40.647678754 +0000
+@@ -2,24 +2,28 @@
+ import numpy as np
+ import os
+ import re
++import argparse
++from pathlib import Path
+ from collections import Counter
+ from openpyxl import Workbook
+ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+ from openpyxl.utils import get_column_letter
++from file_selection import (
++    choose_existing_file, choose_existing_dir, choose_output_dir,
++    read_excel_auto, iter_excel_files, EXCEL_FILETYPES,
++)
+ 
+ 
+-# ─── Paths ────────────────────────────────────────────────────────────────────
+-BASE_DIR = r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data"
+-INPUT_DIR = os.path.join(BASE_DIR, "input")
+-PR_DIR = os.path.join(BASE_DIR, "pr_files")
+-OUTPUT_COVERSHEETS_DIR = os.path.join(BASE_DIR, "output", "coversheets")
+-
+-j1_previous_file = os.path.join(INPUT_DIR, "j1_previous_file.xlsx")
+-clin_table_file = os.path.join(INPUT_DIR, "clin_table_file.xls")
++# ─── Runtime-selected inputs ──────────────────────────────────────────────────
++# These are assigned in main() from CLI arguments or file/folder picker dialogs.
++PR_DIR = None
++OUTPUT_COVERSHEETS_DIR = None
++j1_previous_file = None
++clin_table_file = None
+ 
+ 
+ # ─── Configuration ────────────────────────────────────────────────────────────
+-CURRENT_OP = 5  # Current option period (change this when the period rolls over)
++CURRENT_OP = 5  # Override with --current-op when the period changes.
+ 
+ # ─── Constants ────────────────────────────────────────────────────────────────
+ COVERSHEET_HEADERS = [
+@@ -109,15 +113,15 @@
+     """Load and combine data from the two J1 catalog sheets."""
+     sheet_2b = f"2B_Opt Pd {CURRENT_OP} Catalog"
+     sheet_2c = f"2C_Opt Pd {CURRENT_OP + 1}-11 Catalog"
+-    j1_2b = pd.read_excel(j1_previous_file, sheet_name=sheet_2b)
+-    j1_2c = pd.read_excel(j1_previous_file, sheet_name=sheet_2c)
++    j1_2b = read_excel_auto(j1_previous_file, sheet_name=sheet_2b)
++    j1_2c = read_excel_auto(j1_previous_file, sheet_name=sheet_2c)
+     print(f"  J1 sheets: '{sheet_2b}' + '{sheet_2c}'")
+     return pd.concat([j1_2b, j1_2c], ignore_index=True)
+ 
+ 
+ def load_clin_lookup():
+     """Return dict  { EIS_CLIN_str : Pricing_Method_str }."""
+-    clin_df = pd.read_excel(clin_table_file)
++    clin_df = read_excel_auto(clin_table_file)
+     lookup = {}
+     for _, row in clin_df.iterrows():
+         clin_val = str(row["Clin"]).strip()
+@@ -147,13 +151,8 @@
+ # ─── PR file helpers ──────────────────────────────────────────────────────────
+ 
+ def get_pr_files():
+-    """Return sorted list of PR .xlsx filenames (excluding coversheets)."""
+-    return sorted(
+-        f for f in os.listdir(PR_DIR)
+-        if f.lower().endswith(".xlsx")
+-        and "_coversheet" not in f.lower()
+-        and not f.startswith("~$")
+-    )
++    """Return sorted PR Excel filenames, excluding generated coversheets/temp files."""
++    return [p.name for p in iter_excel_files(Path(PR_DIR), exclude_substrings=("_coversheet", "coversheet"))]
+ 
+ 
+ def extract_pr_number(filename):
+@@ -284,7 +283,7 @@
+ 
+ def process_pr_file(pr_filepath, j1_lookup, clin_lookup):
+     """Return (current_op_rows, oy_rows) for one PR file."""
+-    pr_data = pd.read_excel(pr_filepath)
++    pr_data = read_excel_auto(pr_filepath)
+ 
+     current_op_rows = []
+     oy_rows = []
+@@ -404,8 +403,30 @@
+ 
+ # ─── Main ─────────────────────────────────────────────────────────────────────
+ 
+-def main():
+-    os.makedirs(OUTPUT_COVERSHEETS_DIR, exist_ok=True)
++def parse_args(argv=None):
++    parser = argparse.ArgumentParser(
++        description="Generate coversheets from selected J.1, CLIN lookup, and PR files."
++    )
++    parser.add_argument("--j1-previous-file", help="Path to the J.1 previous workbook")
++    parser.add_argument("--clin-table-file", help="Path to the CLIN lookup workbook")
++    parser.add_argument("--pr-dir", help="Folder containing PR workbooks")
++    parser.add_argument("--output-dir", help="Folder where generated coversheets should be saved")
++    parser.add_argument("--current-op", type=int, default=CURRENT_OP, help="Current option period")
++    return parser.parse_args(argv)
++
++
++def configure_paths(args):
++    global PR_DIR, OUTPUT_COVERSHEETS_DIR, j1_previous_file, clin_table_file, CURRENT_OP
++    CURRENT_OP = args.current_op
++    j1_previous_file = choose_existing_file(args.j1_previous_file, "Select the J.1 previous workbook", EXCEL_FILETYPES)
++    clin_table_file = choose_existing_file(args.clin_table_file, "Select the CLIN lookup workbook", EXCEL_FILETYPES)
++    PR_DIR = choose_existing_dir(args.pr_dir, "Select the folder containing PR workbooks")
++    OUTPUT_COVERSHEETS_DIR = choose_output_dir(args.output_dir, "Select/create the folder for generated coversheets")
++
++
++def main(argv=None):
++    args = parse_args(argv)
++    configure_paths(args)
+ 
+     print("Loading J1 data ...")
+     j1_data = load_j1_data()
+@@ -424,7 +445,7 @@
+ 
+     for pr_file in pr_files:
+         print(f"Processing: {pr_file}")
+-        pr_path = os.path.join(PR_DIR, pr_file)
++        pr_path = Path(PR_DIR) / pr_file
+         pr_number = extract_pr_number(pr_file)
+ 
+         if not pr_number:
+@@ -439,9 +460,7 @@
+             print("  Both sheets empty -- no coversheet needed\n")
+             continue
+ 
+-        coversheet_path = os.path.join(
+-            OUTPUT_COVERSHEETS_DIR, f"{pr_number}_coversheet.xlsx"
+-        )
++        coversheet_path = Path(OUTPUT_COVERSHEETS_DIR) / f"{pr_number}_coversheet.xlsx"
+         create_coversheet(coversheet_path, current_op_rows, oy_rows)
+         print(
+             f"  Current OP: {len(current_op_rows)} row(s) | "
+diff -ru /mnt/data/mod_project_original/mod-automation-main/02_overview_file_script.py /mnt/data/mod_project_work/mod-automation-main/02_overview_file_script.py
+--- /mnt/data/mod_project_original/mod-automation-main/02_overview_file_script.py	2026-06-09 18:17:14.000000000 +0000
++++ /mnt/data/mod_project_work/mod-automation-main/02_overview_file_script.py	2026-06-10 00:38:23.490858236 +0000
+@@ -4,17 +4,19 @@
+ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+ from pathlib import Path
+ import os
++import argparse
+ from typing import Dict, List, Any, Optional
++from file_selection import (
++    choose_existing_dir, choose_optional_file, choose_save_file,
++    read_excel_auto, iter_excel_files, EXCEL_FILETYPES,
++)
+ 
+ 
+-# ─── Paths ────────────────────────────────────────────────────────────────────
+-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
+-INPUT_DIR = BASE_DIR / "input"
+-OUTPUT_DIR = BASE_DIR / "output"
+-COVERSHEET_FILES_DIR = OUTPUT_DIR / "coversheets"
+-
+-clin_table_file = INPUT_DIR / "clin_table_file.xls"
+-overview_output_file = OUTPUT_DIR / "overview_file.xlsx"
++# ─── Runtime-selected inputs ──────────────────────────────────────────────────
++# Assigned in main() from CLI arguments or file/folder picker dialogs.
++COVERSHEET_FILES_DIR = None
++clin_table_file = None
++overview_output_file = None
+ 
+ 
+ def cell_is_checked(val) -> bool:
+@@ -233,7 +235,7 @@
+     Supports both .xls and .xlsx formats via pandas.
+     """
+     try:
+-        df = pd.read_excel(lookup_file_path)
++        df = read_excel_auto(lookup_file_path)
+         df.columns = df.columns.str.strip()
+ 
+         clin_col = 'Clin' if 'Clin' in df.columns else ('CLIN' if 'CLIN' in df.columns else None)
+@@ -629,22 +631,37 @@
+     return df
+ 
+ 
+-def main():
++def parse_args(argv=None):
++    parser = argparse.ArgumentParser(
++        description="Create the overview workbook from selected coversheet files."
++    )
++    parser.add_argument("--coversheets-dir", help="Folder containing coversheet workbooks")
++    parser.add_argument("--clin-table-file", help="Optional CLIN lookup workbook used for Services")
++    parser.add_argument("--output-file", help="Output overview workbook path")
++    return parser.parse_args(argv)
++
++
++def configure_paths(args):
++    global COVERSHEET_FILES_DIR, clin_table_file, overview_output_file
++    COVERSHEET_FILES_DIR = choose_existing_dir(args.coversheets_dir, "Select the folder containing coversheet workbooks")
++    clin_table_file = choose_optional_file(args.clin_table_file, "Select the CLIN lookup workbook, or cancel to skip", EXCEL_FILETYPES)
++    overview_output_file = choose_save_file(args.output_file, "Save the overview workbook as", "overview_file.xlsx", EXCEL_FILETYPES)
++
++
++def main(argv=None):
+     """Main function to process coversheet files."""
+-    os.makedirs(OUTPUT_DIR, exist_ok=True)
++    args = parse_args(argv)
++    configure_paths(args)
+ 
+     if COVERSHEET_FILES_DIR.exists():
+-        coversheet_files = list(COVERSHEET_FILES_DIR.glob("*.xlsx"))
+-        coversheet_files = [f for f in coversheet_files
+-                           if 'overview' not in f.name.lower()
+-                           and not f.name.startswith("~$")]
++        coversheet_files = list(iter_excel_files(COVERSHEET_FILES_DIR, exclude_substrings=("overview",)))
+ 
+         if coversheet_files:
+-            if clin_table_file.exists():
++            if clin_table_file and clin_table_file.exists():
+                 df = create_overview(coversheet_files, str(overview_output_file),
+                                      str(clin_table_file))
+             else:
+-                print("WARNING: CLIN lookup file not found. Services will be blank.")
++                print("WARNING: No CLIN lookup file selected. Services will be blank.")
+                 df = create_overview(coversheet_files, str(overview_output_file), None)
+ 
+             print("\nProcess completed successfully!")
+@@ -656,4 +673,4 @@
+ 
+ 
+ if __name__ == "__main__":
+-    main()
+\ No newline at end of file
++    main()
+diff -ru /mnt/data/mod_project_original/mod-automation-main/03_F_and_R_script.py /mnt/data/mod_project_work/mod-automation-main/03_F_and_R_script.py
+--- /mnt/data/mod_project_original/mod-automation-main/03_F_and_R_script.py	2026-06-09 18:17:14.000000000 +0000
++++ /mnt/data/mod_project_work/mod-automation-main/03_F_and_R_script.py	2026-06-10 00:38:46.368116357 +0000
+@@ -1,22 +1,25 @@
+ import pandas as pd
+ import os
++import argparse
+ from pathlib import Path
+ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+ from openpyxl import Workbook, load_workbook
+ from collections import defaultdict
+ import math
++from file_selection import (
++    choose_existing_file, choose_existing_dir, choose_save_file,
++    iter_excel_files, read_excel_auto, excel_file, EXCEL_FILETYPES,
++)
+ 
+ 
+ # ─── Configuration ────────────────────────────────────────────────────────────
+ CURRENT_OPTION_PERIOD = 5
+ 
+-# ─── Paths ────────────────────────────────────────────────────────────────────
+-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
+-OUTPUT_DIR = BASE_DIR / "output"
+-PR_DIR = BASE_DIR / "pr_files"
+-
+-overview_file = OUTPUT_DIR / "overview_file.xlsx"
+-f_r_output_file = OUTPUT_DIR / "f_r_output.xlsx"
++# ─── Runtime-selected inputs ──────────────────────────────────────────────────
++# Assigned in main() from CLI arguments or file/folder picker dialogs.
++PR_DIR = None
++overview_file = None
++f_r_output_file = None
+ 
+ 
+ def _clean(val):
+@@ -38,7 +41,7 @@
+         (PR#, Version, OpDiv, SF30 Description, 12M+ CLIN)
+     """
+     # Read Excel and strip column names
+-    df = pd.read_excel(overview_path, dtype=str)  # read all as string to preserve formatting
++    df = read_excel_auto(overview_path, dtype=str)  # read all as string to preserve formatting
+     df.columns = df.columns.str.strip()
+ 
+     # Filter rows where F&R Needed == 'Yes'
+@@ -116,7 +119,7 @@
+ def get_comps_sheet(pr_file: Path):
+     """Load the 'comps' worksheet (case-insensitive) and return as DataFrame."""
+     try:
+-        xls = pd.ExcelFile(pr_file)
++        xls = excel_file(pr_file)
+         comps_sheet = next((s for s in xls.sheet_names if "comp" in s.lower()), None)
+         if comps_sheet:
+             df = pd.read_excel(xls, sheet_name=comps_sheet)
+@@ -148,8 +151,38 @@
+     """
+     Extract J1 rate from the J1 worksheet for a given case number and pricing element.
+     Returns the HHS Price as a float for the row where TO Period == "OPT PD {CURRENT_OPTION_PERIOD}".
++    Supports .xlsb through pandas because openpyxl cannot open binary Excel files.
+     """
+     try:
++        if pr_file.suffix.lower() == ".xlsb":
++            xls = excel_file(pr_file)
++            j1_sheet = next((s for s in xls.sheet_names if "j1" in s.lower() or "j.1" in s.lower()), None)
++            if not j1_sheet:
++                print(f"  No 'J1' sheet found in {pr_file.name}")
++                return None
++            df = pd.read_excel(xls, sheet_name=j1_sheet)
++            df.columns = [str(c).strip() for c in df.columns]
++            required = {"Case Number", "SRE Pricing Element", "TO Period", "HHS Price"}
++            if not required.issubset(set(df.columns)):
++                print(f"  Missing required columns in J1 sheet of {pr_file.name}")
++                return None
++            target_period = f"OPT PD {CURRENT_OPTION_PERIOD}"
++            for _, row in df.iterrows():
++                row_case = _clean(row.get("Case Number"))
++                raw_pricing = _clean(row.get("SRE Pricing Element"))
++                try:
++                    row_pricing = str(int(float(raw_pricing))).zfill(2) if raw_pricing else ""
++                except (ValueError, TypeError):
++                    row_pricing = raw_pricing.zfill(2) if raw_pricing else ""
++                row_period = _clean(row.get("TO Period"))
++                if row_case == case_number and row_pricing == pricing_element and row_period == target_period:
++                    raw_price = row.get("HHS Price")
++                    try:
++                        return float(str(raw_price).replace("$", "").replace(",", ""))
++                    except (ValueError, TypeError):
++                        return None
++            return None
++
+         wb = load_workbook(pr_file)
+         j1_sheet = next((s for s in wb.sheetnames if "j1" in s.lower() or "j.1" in s.lower()), None)
+         
+@@ -223,7 +256,7 @@
+     converts Pricing Element to numeric when possible, and merges duplicate Case Numbers.
+     Also creates separate PR tabs before merging.
+     """
+-    os.makedirs(OUTPUT_DIR, exist_ok=True)
++    f_r_output_file.parent.mkdir(parents=True, exist_ok=True)
+ 
+     # Step 1: Get PRs needing F&R
+     fr_pr_list = get_fr_pr_numbers(overview_file)
+@@ -236,8 +269,8 @@
+         print(f"Processing {pr_identifier}...")
+ 
+         pr_files = [
+-            f for f in PR_DIR.glob(f"{pr_identifier}*.xlsx")
+-            if not f.name.startswith("~$")
++            f for f in iter_excel_files(PR_DIR)
++            if f.name.upper().startswith(pr_identifier.upper())
+         ]
+         if not pr_files:
+             print(f"  No PR files found for {pr_identifier} in {PR_DIR}")
+@@ -543,5 +576,31 @@
+         app.quit()
+ 
+ 
++def parse_args(argv=None):
++    parser = argparse.ArgumentParser(
++        description="Build the F&R workbook from a selected overview file and PR folder."
++    )
++    parser.add_argument("--overview-file", help="Overview workbook path")
++    parser.add_argument("--pr-dir", help="Folder containing PR workbooks")
++    parser.add_argument("--output-file", help="Output F&R workbook path")
++    parser.add_argument("--current-option-period", type=int, default=CURRENT_OPTION_PERIOD,
++                        help="Current option period used for J.1 rate matching")
++    return parser.parse_args(argv)
++
++
++def configure_paths(args):
++    global overview_file, PR_DIR, f_r_output_file, CURRENT_OPTION_PERIOD
++    CURRENT_OPTION_PERIOD = args.current_option_period
++    overview_file = choose_existing_file(args.overview_file, "Select the overview workbook", EXCEL_FILETYPES)
++    PR_DIR = choose_existing_dir(args.pr_dir, "Select the folder containing PR workbooks")
++    f_r_output_file = choose_save_file(args.output_file, "Save the F&R workbook as", "f_r_output.xlsx", EXCEL_FILETYPES)
++
++
++def main(argv=None):
++    args = parse_args(argv)
++    configure_paths(args)
++    return build_FR()
++
++
+ if __name__ == "__main__":
+-    build_FR()
++    main()
+diff -ru /mnt/data/mod_project_original/mod-automation-main/04_build_file_script.py /mnt/data/mod_project_work/mod-automation-main/04_build_file_script.py
+--- /mnt/data/mod_project_original/mod-automation-main/04_build_file_script.py	2026-06-09 18:17:14.000000000 +0000
++++ /mnt/data/mod_project_work/mod-automation-main/04_build_file_script.py	2026-06-10 00:39:36.326862094 +0000
+@@ -10,26 +10,29 @@
+ import pandas as pd
+ import re
+ import shutil
++import argparse
+ from pathlib import Path
+ import warnings
+ from typing import Dict, List, Optional, Tuple
+ from openpyxl import load_workbook, Workbook
+ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+ from openpyxl.utils import get_column_letter
++from file_selection import (
++    choose_existing_file, choose_existing_dir, choose_save_file,
++    iter_excel_files, find_excel_by_prefix, read_excel_auto, excel_file,
++    EXCEL_FILETYPES,
++)
+ 
+ # Suppress warnings for cleaner output
+ warnings.filterwarnings('ignore')
+ 
+ 
+-# ─── Paths ────────────────────────────────────────────────────────────────────
+-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
+-INPUT_DIR = BASE_DIR / "input"
+-OUTPUT_DIR = BASE_DIR / "output"
+-PR_DIR = BASE_DIR / "pr_files"
+-COVERSHEET_FILES_DIR = OUTPUT_DIR / "coversheets"
+-
+-build_file_input = INPUT_DIR / "build_file.xlsx"
+-build_file_output = OUTPUT_DIR / "build_file.xlsx"
++# ─── Runtime-selected inputs ──────────────────────────────────────────────────
++# Assigned in main() from CLI arguments or file/folder picker dialogs.
++PR_DIR = None
++COVERSHEET_FILES_DIR = None
++build_file_input = None
++build_file_output = None
+ 
+ 
+ # ============================================================
+@@ -68,20 +71,9 @@
+         print(f"Error: PR directory does not exist: {pr_path}")
+         return None
+         
+-    # Search for PR file that starts with the PR number
+-    pattern = f"{pr_number}*.xlsx"
+-    matching_files = list(pr_path.glob(pattern))
+-    
+-    if matching_files:
+-        # Return the first match (there should typically be only one)
+-        return matching_files[0]
+-    
+-    # Try case-insensitive search
+-    for file in pr_path.glob("*.xlsx"):
+-        if file.name.upper().startswith(pr_number.upper()):
+-            return file
+-            
+-    return None
++    # Search for an Excel PR file that starts with the PR number.
++    # Supports .xlsx, .xlsm, .xlsb, and .xls instead of hard-coding .xlsx.
++    return find_excel_by_prefix(pr_path, pr_number)
+ 
+ 
+ def convert_to_period(to_period_value) -> Optional[str]:
+@@ -124,8 +116,12 @@
+     pricing_map = {}
+     
+     try:
+-        # Read the CLIN Table sheet
+-        clin_table = pd.read_excel(build_file_path, sheet_name='CLIN Table 2024.10.04')
++        # Read the first CLIN Table-like sheet instead of a date-stamped sheet name.
++        xls = excel_file(build_file_path)
++        clin_sheet = next((sheet for sheet in xls.sheet_names if 'clin table' in sheet.lower()), None)
++        if not clin_sheet:
++            raise ValueError("No sheet containing 'CLIN Table' was found in the build workbook")
++        clin_table = pd.read_excel(xls, sheet_name=clin_sheet)
+         
+         # Create mapping from Clin to Pricing Method
+         for _, row in clin_table.iterrows():
+@@ -241,8 +237,8 @@
+     """
+     try:
+         # Read coversheet sheets
+-        coversheet_current = pd.read_excel(coversheet_file, sheet_name='CLIN Table (Current OP)')
+-        coversheet_oy = pd.read_excel(coversheet_file, sheet_name='CLIN Table (OY)')
++        coversheet_current = read_excel_auto(coversheet_file, sheet_name='CLIN Table (Current OP)')
++        coversheet_oy = read_excel_auto(coversheet_file, sheet_name='CLIN Table (OY)')
+         
+         # Combine both coversheet sheets
+         coversheet_data = pd.concat([coversheet_current, coversheet_oy], ignore_index=True)
+@@ -286,7 +282,7 @@
+         DataFrame with PR J1 data
+     """
+     try:
+-        return pd.read_excel(pr_file, sheet_name='J1')
++        return read_excel_auto(pr_file, sheet_name='J1')
+     except Exception as e:
+         print(f"Error reading PR file {pr_file.name}: {str(e)}")
+         return pd.DataFrame()
+@@ -464,7 +460,7 @@
+         print(f"Error: Coversheet directory does not exist: {coversheet_path}")
+         return []
+     
+-    coversheet_files = list(coversheet_path.glob("*.xlsx"))
++    coversheet_files = list(iter_excel_files(coversheet_path))
+     print(f"\nFound {len(coversheet_files)} coversheet files to process")
+     return coversheet_files
+ 
+@@ -696,7 +692,7 @@
+             return {}
+         
+         # Read as DataFrame
+-        clin_df = pd.read_excel(build_file_path, sheet_name=clin_sheet_name)
++        clin_df = read_excel_auto(build_file_path, sheet_name=clin_sheet_name)
+         clin_df.columns = clin_df.columns.str.strip()
+         
+         # Create mapping: Clin -> Pricing Method
+@@ -740,7 +736,7 @@
+             return {}
+         
+         # Read as DataFrame
+-        device_df = pd.read_excel(build_file_path, sheet_name=device_sheet_name)
++        device_df = read_excel_auto(build_file_path, sheet_name=device_sheet_name)
+         device_df.columns = device_df.columns.str.strip()
+         
+         # Create mapping: Device Class ID -> HHS Percentage Discount from OLP
+@@ -841,7 +837,7 @@
+             return {}, {}
+         
+         # Read as DataFrame
+-        clin_df = pd.read_excel(build_file_path, sheet_name=clin_sheet_name)
++        clin_df = read_excel_auto(build_file_path, sheet_name=clin_sheet_name)
+         clin_df.columns = clin_df.columns.str.strip()
+         
+         icb_mapping = {}
+@@ -1124,7 +1120,7 @@
+     print(f"Found J.1 sheet: {j1_sheet_name}")
+     
+     # Read J.1 sheet as DataFrame
+-    j1_df = pd.read_excel(build_file_path, sheet_name=j1_sheet_name)
++    j1_df = read_excel_auto(build_file_path, sheet_name=j1_sheet_name)
+     j1_df.columns = j1_df.columns.str.strip()
+     
+     print(f"J.1 sheet has {len(j1_df)} rows")
+@@ -1319,11 +1315,32 @@
+ # MAIN EXECUTION
+ # ============================================================
+ 
+-def main():
++def parse_args(argv=None):
++    parser = argparse.ArgumentParser(
++        description="Create the build workbook from selected build template, coversheets, and PR files."
++    )
++    parser.add_argument("--build-file", help="Build template/source workbook to copy and update")
++    parser.add_argument("--coversheets-dir", help="Folder containing approved coversheet workbooks")
++    parser.add_argument("--pr-dir", help="Folder containing PR workbooks")
++    parser.add_argument("--output-file", help="Output build workbook path")
++    return parser.parse_args(argv)
++
++
++def configure_paths(args):
++    global build_file_input, build_file_output, PR_DIR, COVERSHEET_FILES_DIR
++    build_file_input = choose_existing_file(args.build_file, "Select the build template/source workbook", EXCEL_FILETYPES)
++    COVERSHEET_FILES_DIR = choose_existing_dir(args.coversheets_dir, "Select the folder containing approved coversheets")
++    PR_DIR = choose_existing_dir(args.pr_dir, "Select the folder containing PR workbooks")
++    build_file_output = choose_save_file(args.output_file, "Save the generated build workbook as", "build_file.xlsx", EXCEL_FILETYPES)
++
++
++def main(argv=None):
+     """Main function to run both J.1 and Catalog automation."""
+-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
++    args = parse_args(argv)
++    configure_paths(args)
++    build_file_output.parent.mkdir(parents=True, exist_ok=True)
+ 
+-    # Copy the pristine build file from input/ to output/ before modifying
++    # Copy the selected pristine build file to the selected output path before modifying.
+     if not build_file_input.exists():
+         print(f"Error: Build file not found at {build_file_input}")
+         return {'j1_rows': 0, 'catalog_rows': 0, 'success': False}
+diff -ru /mnt/data/mod_project_original/mod-automation-main/05_J1_script.py /mnt/data/mod_project_work/mod-automation-main/05_J1_script.py
+--- /mnt/data/mod_project_original/mod-automation-main/05_J1_script.py	2026-06-09 18:17:14.000000000 +0000
++++ /mnt/data/mod_project_work/mod-automation-main/05_J1_script.py	2026-06-10 00:41:32.613277165 +0000
+@@ -7,30 +7,31 @@
+ 
+ import pandas as pd
+ import shutil
++import argparse
+ from pathlib import Path
+ from openpyxl import load_workbook
+ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+ from datetime import datetime
+ import warnings
++from file_selection import (
++    choose_existing_file, choose_save_file, read_excel_auto, EXCEL_FILETYPES,
++)
+ 
+ warnings.filterwarnings('ignore')
+ 
+ 
+-# ─── Paths ────────────────────────────────────────────────────────────────────
+-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
+-INPUT_DIR = BASE_DIR / "input"
+-OUTPUT_DIR = BASE_DIR / "output"
+-
+-build_file = OUTPUT_DIR / "build_file.xlsx"
+-j1_previous_file_input = INPUT_DIR / "j1_previous_file.xlsx"
+-j1_current_file = OUTPUT_DIR / "j1_current_file.xlsx"
++# ─── Runtime-selected inputs ──────────────────────────────────────────────────
++# Assigned in main() from CLI arguments or file picker dialogs.
++build_file = None
++j1_previous_file_input = None
++j1_current_file = None
+ 
+ 
+ # ============================================================
+ # CALCULATE CURRENT OPT PD
+ # ============================================================
+ 
+-def get_current_opt_pd():
++def get_current_opt_pd(verbose=True):
+     """
+     Calculate the current Option Period based on the current date.
+     
+@@ -74,15 +75,16 @@
+         period_start = f"9/1/{current_year - 1}"
+         period_end = f"8/31/{current_year}"
+     
+-    print(f"\nCurrent Date: {current_date.strftime('%m/%d/%Y %H:%M:%S')}")
+-    print(f"Current Option Period: {current_opt_pd}")
+-    print(f"Period Range: {period_start} - {period_end}")
++    if verbose:
++        print(f"\nCurrent Date: {current_date.strftime('%m/%d/%Y %H:%M:%S')}")
++        print(f"Current Option Period: {current_opt_pd}")
++        print(f"Period Range: {period_start} - {period_end}")
+     
+     return current_opt_pd
+ 
+ 
+ # Store the current Opt Pd as a global variable
+-CURRENT_OPT_PD = get_current_opt_pd()
++CURRENT_OPT_PD = get_current_opt_pd(verbose=False)
+ 
+ 
+ # ============================================================
+@@ -169,7 +171,7 @@
+     
+     for sheet_name in sheet_names:
+         try:
+-            df = pd.read_excel(j1_file_path, sheet_name=sheet_name)
++            df = read_excel_auto(j1_file_path, sheet_name=sheet_name)
+             if 'Price Id' in df.columns:
+                 sheet_max = df['Price Id'].max()
+                 if pd.notna(sheet_max) and sheet_max > max_price_id:
+@@ -192,7 +194,7 @@
+         DataFrame with Catalog data
+     """
+     try:
+-        catalog_df = pd.read_excel(build_file_path, sheet_name='Catalog')
++        catalog_df = read_excel_auto(build_file_path, sheet_name='Catalog')
+         catalog_df.columns = catalog_df.columns.str.strip()
+         print(f"Read {len(catalog_df)} rows from Catalog sheet")
+         return catalog_df
+@@ -313,20 +315,20 @@
+     # Convert TO Period to numeric for comparison
+     catalog_df['TO_Period_Numeric'] = pd.to_numeric(catalog_df['TO Period'], errors='coerce')
+     
+-    # Filter by TO Period
+-    pd5_entries = catalog_df[catalog_df['TO_Period_Numeric'] == 5].copy()
+-    pd6_11_entries = catalog_df[
+-        (catalog_df['TO_Period_Numeric'] >= 6) & 
++    # Filter by the selected/current Option Period instead of hard-coded OP 5.
++    current_entries = catalog_df[catalog_df['TO_Period_Numeric'] == CURRENT_OPT_PD].copy()
++    future_entries = catalog_df[
++        (catalog_df['TO_Period_Numeric'] >= CURRENT_OPT_PD + 1) &
+         (catalog_df['TO_Period_Numeric'] <= 11)
+     ].copy()
+     
+     print(f"\nCategorized entries:")
+-    print(f"  TO Period 5: {len(pd5_entries)} entries")
+-    print(f"  TO Period 6-11: {len(pd6_11_entries)} entries")
++    print(f"  TO Period {CURRENT_OPT_PD}: {len(current_entries)} entries")
++    print(f"  TO Period {CURRENT_OPT_PD + 1}-11: {len(future_entries)} entries")
+     
+     return {
+-        'pd5': pd5_entries,
+-        'pd6_11': pd6_11_entries
++        'pd5': current_entries,
++        'pd6_11': future_entries
+     }
+ 
+ 
+@@ -438,11 +440,33 @@
+ # MAIN EXECUTION
+ # ============================================================
+ 
+-def main():
+-    """Main function to execute the J1_Example automation."""
+-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
++def parse_args(argv=None):
++    parser = argparse.ArgumentParser(
++        description="Create the current J.1 workbook from selected prior J.1 and build workbooks."
++    )
++    parser.add_argument("--build-file", help="Build workbook containing the Catalog sheet")
++    parser.add_argument("--j1-previous-file", help="Prior/current baseline J.1 workbook to copy and update")
++    parser.add_argument("--output-file", help="Output J.1 workbook path")
++    parser.add_argument("--current-opt-pd", type=int, default=CURRENT_OPT_PD,
++                        help="Current option period; defaults to calculated value")
++    return parser.parse_args(argv)
++
++
++def configure_paths(args):
++    global build_file, j1_previous_file_input, j1_current_file, CURRENT_OPT_PD
++    CURRENT_OPT_PD = args.current_opt_pd
++    build_file = choose_existing_file(args.build_file, "Select the build workbook with the Catalog sheet", EXCEL_FILETYPES)
++    j1_previous_file_input = choose_existing_file(args.j1_previous_file, "Select the J.1 previous workbook", EXCEL_FILETYPES)
++    j1_current_file = choose_save_file(args.output_file, "Save the updated/current J.1 workbook as", "j1_current_file.xlsx", EXCEL_FILETYPES)
++
++
++def main(argv=None):
++    """Main function to execute the J1 automation."""
++    args = parse_args(argv)
++    configure_paths(args)
++    j1_current_file.parent.mkdir(parents=True, exist_ok=True)
+ 
+-    # Copy the pristine j1_previous_file from input/ to output/ before modifying
++    # Copy the selected J.1 previous file before modifying.
+     if not j1_previous_file_input.exists():
+         print(f"Error: J1 previous file not found at {j1_previous_file_input}")
+         return
+diff -ru /mnt/data/mod_project_original/mod-automation-main/06_J17_file_script.py /mnt/data/mod_project_work/mod-automation-main/06_J17_file_script.py
+--- /mnt/data/mod_project_original/mod-automation-main/06_J17_file_script.py	2026-06-09 18:17:14.000000000 +0000
++++ /mnt/data/mod_project_work/mod-automation-main/06_J17_file_script.py	2026-06-10 00:40:29.223709742 +0000
+@@ -1,25 +1,26 @@
+ import os
++import argparse
+ import pandas as pd
+ import re
+ from pathlib import Path
+ from openpyxl import load_workbook
+ from openpyxl.styles import Font, PatternFill, Alignment
++from file_selection import (
++    choose_existing_file, choose_save_file, read_excel_auto, EXCEL_FILETYPES,
++)
+ 
+ 
+-# ─── Paths ────────────────────────────────────────────────────────────────────
+-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
+-INPUT_DIR = BASE_DIR / "input"
+-OUTPUT_DIR = BASE_DIR / "output"
+-
+-j17_file = INPUT_DIR / "j17_file.xlsx"
+-j1_previous_file_input = INPUT_DIR / "j1_previous_file.xlsx"
+-j1_current_file = OUTPUT_DIR / "j1_current_file.xlsx"
+-eis_billing_file = INPUT_DIR / "EIS Billing Detail - MAR 2026 - HHS EIS PMO 75P00120F80177.xlsx"
+-j17_updated_file = OUTPUT_DIR / "j17_updated_file.xlsx"
++# ─── Runtime-selected inputs ──────────────────────────────────────────────────
++# Assigned in main() from CLI arguments or file picker dialogs.
++j17_file = None
++j1_previous_file_input = None
++j1_current_file = None
++eis_billing_file = None
++j17_updated_file = None
+ 
+ # ─── Configuration ────────────────────────────────────────────────────────────
+ current_option_period = 5
+-current_month = "December"
++current_month = None
+ 
+ 
+ def extract_month_from_filename(filename):
+@@ -31,28 +32,31 @@
+     return ""
+ 
+ 
++def extract_month_name_from_filename(filename):
++    match = re.search(r'EIS Billing Detail - (\w+) (\d+)', filename.replace('_', ' '))
++    return match.group(1).title() if match else None
++
++
+ def get_catalog_sheet_name(option_period):
+     return f"2B_Opt Pd {option_period} Catalog"
+ 
+ 
+ def load_existing_j17_data(filepath):
+-    catalog_df = pd.read_excel(filepath, sheet_name='Catalog of Subscription CLINs')
+-    active_df = pd.read_excel(filepath, sheet_name='J.17 Active Subscriptions')
+-    expired_df = pd.read_excel(filepath, sheet_name='J.17 Expired Subscriptions')
++    catalog_df = read_excel_auto(filepath, sheet_name='Catalog of Subscription CLINs')
++    active_df = read_excel_auto(filepath, sheet_name='J.17 Active Subscriptions')
++    expired_df = read_excel_auto(filepath, sheet_name='J.17 Expired Subscriptions')
+     return catalog_df, active_df, expired_df
+ 
+ 
+ def load_draft_j1_catalog(filepath, option_period):
+     sheet_name = get_catalog_sheet_name(option_period)
+-    filepath_str = str(filepath)
+-    engine = 'pyxlsb' if filepath_str.endswith('.xlsb') else None
+-    df = pd.read_excel(filepath, sheet_name=sheet_name, engine=engine)
++    df = read_excel_auto(filepath, sheet_name=sheet_name)
+     return df
+ 
+ 
+ def load_billing_data(filepath):
+-    bi_df = pd.read_excel(filepath, sheet_name='Billing Invoice (BI) Detail')
+-    ba_df = pd.read_excel(filepath, sheet_name='Billing Adjustment (BA) Detail')
++    bi_df = read_excel_auto(filepath, sheet_name='Billing Invoice (BI) Detail')
++    ba_df = read_excel_auto(filepath, sheet_name='Billing Adjustment (BA) Detail')
+     return bi_df, ba_df
+ 
+ 
+@@ -320,15 +324,45 @@
+     wb.save(output_path)
+ 
+ 
+-def main():
+-    os.makedirs(OUTPUT_DIR, exist_ok=True)
++def parse_args(argv=None):
++    parser = argparse.ArgumentParser(
++        description="Create the updated J.17 workbook from selected J.17, J.1, and billing workbooks."
++    )
++    parser.add_argument("--j17-file", help="Source J.17 workbook")
++    parser.add_argument("--j1-previous-file", help="Baseline J.1 previous workbook")
++    parser.add_argument("--j1-current-file", help="Updated/current J.1 workbook")
++    parser.add_argument("--billing-file", help="EIS Billing Detail workbook")
++    parser.add_argument("--output-file", help="Output updated J.17 workbook path")
++    parser.add_argument("--option-period", type=int, default=current_option_period, help="Current option period")
++    parser.add_argument("--current-month", help="Month used to identify expired subscriptions; defaults to billing filename month when found")
++    return parser.parse_args(argv)
++
++
++def configure_paths(args):
++    global j17_file, j1_previous_file_input, j1_current_file, eis_billing_file
++    global j17_updated_file, current_option_period, current_month
++    current_option_period = args.option_period
++    j17_file = choose_existing_file(args.j17_file, "Select the source J.17 workbook", EXCEL_FILETYPES)
++    j1_previous_file_input = choose_existing_file(args.j1_previous_file, "Select the baseline J.1 previous workbook", EXCEL_FILETYPES)
++    j1_current_file = choose_existing_file(args.j1_current_file, "Select the updated/current J.1 workbook", EXCEL_FILETYPES)
++    eis_billing_file = choose_existing_file(args.billing_file, "Select the EIS Billing Detail workbook", EXCEL_FILETYPES)
++    j17_updated_file = choose_save_file(args.output_file, "Save the updated J.17 workbook as", "j17_updated_file.xlsx", EXCEL_FILETYPES)
++    current_month = args.current_month or extract_month_name_from_filename(str(eis_billing_file))
++    if not current_month:
++        current_month = input("Current billing month for expired-subscription logic (for example, March): ").strip()
++
++
++def main(argv=None):
++    args = parse_args(argv)
++    configure_paths(args)
++    j17_updated_file.parent.mkdir(parents=True, exist_ok=True)
+ 
+     month_value = extract_month_from_filename(str(eis_billing_file))
+ 
+     catalog_df, active_df, expired_df = load_existing_j17_data(j17_file)
+ 
+     sheet_name = get_catalog_sheet_name(current_option_period)
+-    original_j1_df = pd.read_excel(j1_previous_file_input, sheet_name=sheet_name)
++    original_j1_df = read_excel_auto(j1_previous_file_input, sheet_name=sheet_name)
+     original_row_count = len(original_j1_df)
+ 
+     full_j1_df = load_draft_j1_catalog(j1_current_file, current_option_period)
+diff -ru /mnt/data/mod_project_original/mod-automation-main/07_MFR_walkthrough_script.py /mnt/data/mod_project_work/mod-automation-main/07_MFR_walkthrough_script.py
+--- /mnt/data/mod_project_original/mod-automation-main/07_MFR_walkthrough_script.py	2026-06-09 18:17:14.000000000 +0000
++++ /mnt/data/mod_project_work/mod-automation-main/07_MFR_walkthrough_script.py	2026-06-10 00:40:44.955062391 +0000
+@@ -10,25 +10,26 @@
+ """
+ 
+ import os
++import argparse
+ from pathlib import Path
+ 
+ from openpyxl import load_workbook
+ from docx import Document
+ from docx.shared import Pt, Inches
++from file_selection import (
++    choose_existing_file, choose_save_file, EXCEL_FILETYPES, WORD_FILETYPES,
++)
+ 
+ 
+ # ─── Configuration ────────────────────────────────────────────────────────────
+ option_period = 5
+-mod_number = 'P00078'
++mod_number = None
+ 
+ 
+-# ─── Paths ────────────────────────────────────────────────────────────────────
+-BASE_DIR = Path(r"D:\1_emerjence_work\04_HHS\09_new_mod_automation\Data")
+-INPUT_DIR = BASE_DIR / "input"
+-OUTPUT_DIR = BASE_DIR / "output"
+-
+-j1_current_file = OUTPUT_DIR / "j1_current_file.xlsx"
+-mfr_walkthrough_output = OUTPUT_DIR / f"{mod_number} MFR Walkthrough Output.docx"
++# ─── Runtime-selected inputs ──────────────────────────────────────────────────
++# Assigned in main() from CLI arguments or file picker dialogs.
++j1_current_file = None
++mfr_walkthrough_output = None
+ 
+ 
+ # ─── Constants ────────────────────────────────────────────────────────────────
+@@ -305,8 +306,30 @@
+ # MAIN
+ # ============================================================
+ 
+-def main():
+-    os.makedirs(OUTPUT_DIR, exist_ok=True)
++def parse_args(argv=None):
++    parser = argparse.ArgumentParser(
++        description="Generate the MFR Walkthrough Word document from a selected J.1 current workbook."
++    )
++    parser.add_argument("--j1-current-file", help="Updated/current J.1 workbook")
++    parser.add_argument("--output-file", help="Output Word document path")
++    parser.add_argument("--option-period", type=int, default=option_period, help="Option period to analyze")
++    parser.add_argument("--mod-number", required=False, help="Mod number for the document heading/output default")
++    return parser.parse_args(argv)
++
++
++def configure_paths(args):
++    global j1_current_file, mfr_walkthrough_output, option_period, mod_number
++    option_period = args.option_period
++    mod_number = args.mod_number or input("Mod number for MFR Walkthrough document, for example P00078: ").strip()
++    default_name = f"{mod_number} MFR Walkthrough Output.docx" if mod_number else "MFR Walkthrough Output.docx"
++    j1_current_file = choose_existing_file(args.j1_current_file, "Select the updated/current J.1 workbook", EXCEL_FILETYPES)
++    mfr_walkthrough_output = choose_save_file(args.output_file, "Save the MFR Walkthrough document as", default_name, WORD_FILETYPES)
++
++
++def main(argv=None):
++    args = parse_args(argv)
++    configure_paths(args)
++    mfr_walkthrough_output.parent.mkdir(parents=True, exist_ok=True)
+ 
+     sheet_2b_name, sheet_2c_name, sheet_2d_name = get_sheet_names(option_period)
+ 
+Only in /mnt/data/mod_project_work/mod-automation-main: __pycache__
+Only in /mnt/data/mod_project_work/mod-automation-main: file_selection.py

@@ -1,39 +1,42 @@
 """
-J1 Previous File Automation
+J1 Current File Automation
+
 This script reads from the Catalog sheet in the Build file and appends entries
-to the appropriate sheets in the J1 previous file based on TO Period.
-It copies the original j1_previous_file from input/ to output/ before modifying.
+to the appropriate sheets in the J1 file based on TO Period.
+
+The selected previous J.1 workbook is copied/converted to an .xlsx output
+workbook before modification. Binary .xlsb/.xls baselines cannot simply be
+renamed to .xlsx; when one is selected, the script attempts a real Excel
+conversion before using openpyxl to append rows.
 """
 
 import pandas as pd
 import shutil
+import argparse
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from datetime import datetime
 import warnings
-
-from workflow_io import choose_file, choose_save_file
+from file_selection import (
+    choose_existing_file, choose_save_file, read_excel_auto, EXCEL_FILETYPES,
+)
 
 warnings.filterwarnings('ignore')
 
 
-
-# ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = None
-INPUT_DIR = None
-OUTPUT_DIR = None
-
+# ─── Runtime-selected inputs ──────────────────────────────────────────────────
+# Assigned in main() from CLI arguments or file picker dialogs.
 build_file = None
 j1_previous_file_input = None
-j1_previous_file = None
+j1_current_file = None
 
 
 # ============================================================
 # CALCULATE CURRENT OPT PD
 # ============================================================
 
-def get_current_opt_pd():
+def get_current_opt_pd(verbose=True):
     """
     Calculate the current Option Period based on the current date.
     
@@ -77,15 +80,16 @@ def get_current_opt_pd():
         period_start = f"9/1/{current_year - 1}"
         period_end = f"8/31/{current_year}"
     
-    print(f"\nCurrent Date: {current_date.strftime('%m/%d/%Y %H:%M:%S')}")
-    print(f"Current Option Period: {current_opt_pd}")
-    print(f"Period Range: {period_start} - {period_end}")
+    if verbose:
+        print(f"\nCurrent Date: {current_date.strftime('%m/%d/%Y %H:%M:%S')}")
+        print(f"Current Option Period: {current_opt_pd}")
+        print(f"Period Range: {period_start} - {period_end}")
     
     return current_opt_pd
 
 
 # Store the current Opt Pd as a global variable
-CURRENT_OPT_PD = get_current_opt_pd()
+CURRENT_OPT_PD = get_current_opt_pd(verbose=False)
 
 
 # ============================================================
@@ -172,7 +176,7 @@ def get_max_price_id(j1_file_path):
     
     for sheet_name in sheet_names:
         try:
-            df = pd.read_excel(j1_file_path, sheet_name=sheet_name)
+            df = read_excel_auto(j1_file_path, sheet_name=sheet_name)
             if 'Price Id' in df.columns:
                 sheet_max = df['Price Id'].max()
                 if pd.notna(sheet_max) and sheet_max > max_price_id:
@@ -195,7 +199,7 @@ def read_catalog_from_build(build_file_path):
         DataFrame with Catalog data
     """
     try:
-        catalog_df = pd.read_excel(build_file_path, sheet_name='Catalog')
+        catalog_df = read_excel_auto(build_file_path, sheet_name='Catalog')
         catalog_df.columns = catalog_df.columns.str.strip()
         print(f"Read {len(catalog_df)} rows from Catalog sheet")
         return catalog_df
@@ -206,32 +210,29 @@ def read_catalog_from_build(build_file_path):
 
 def format_date_value(date_value):
     """
-    Format date value to ensure it's properly copied.
+    Format date value to DD-MM-YYYY format.
     
     Args:
         date_value: Date value in various formats
         
     Returns:
-        Formatted date string or original value
+        Formatted date string in DD-MM-YYYY format or original value
     """
     if pd.isna(date_value) or date_value == "":
         return ""
     
     try:
-        # If it's already a string, return it
         if isinstance(date_value, str):
-            return date_value
+            date_obj = pd.to_datetime(date_value)
+            return date_obj.strftime('%d-%m-%Y')
         
-        # If it's a datetime, format it
         if isinstance(date_value, pd.Timestamp):
-            return date_value.strftime('%#m/%#d/%y')
+            return date_value.strftime('%d-%m-%Y')
         
-        # Try to convert to datetime
         date_obj = pd.to_datetime(date_value)
-        return date_obj.strftime('%#m/%#d/%y')
+        return date_obj.strftime('%d-%m-%Y')
         
     except:
-        # If all else fails, return as string
         return str(date_value)
 
 
@@ -319,20 +320,20 @@ def categorize_by_to_period(catalog_df):
     # Convert TO Period to numeric for comparison
     catalog_df['TO_Period_Numeric'] = pd.to_numeric(catalog_df['TO Period'], errors='coerce')
     
-    # Filter by TO Period
-    pd5_entries = catalog_df[catalog_df['TO_Period_Numeric'] == 5].copy()
-    pd6_11_entries = catalog_df[
-        (catalog_df['TO_Period_Numeric'] >= 6) & 
+    # Filter by the selected/current Option Period instead of hard-coded OP 5.
+    current_entries = catalog_df[catalog_df['TO_Period_Numeric'] == CURRENT_OPT_PD].copy()
+    future_entries = catalog_df[
+        (catalog_df['TO_Period_Numeric'] >= CURRENT_OPT_PD + 1) &
         (catalog_df['TO_Period_Numeric'] <= 11)
     ].copy()
     
     print(f"\nCategorized entries:")
-    print(f"  TO Period 5: {len(pd5_entries)} entries")
-    print(f"  TO Period 6-11: {len(pd6_11_entries)} entries")
+    print(f"  TO Period {CURRENT_OPT_PD}: {len(current_entries)} entries")
+    print(f"  TO Period {CURRENT_OPT_PD + 1}-11: {len(future_entries)} entries")
     
     return {
-        'pd5': pd5_entries,
-        'pd6_11': pd6_11_entries
+        'pd5': current_entries,
+        'pd6_11': future_entries
     }
 
 
@@ -440,58 +441,147 @@ def append_to_j1_sheet(j1_file_path, sheet_name, entries_df, start_price_id):
     return current_price_id
 
 
+
+def _force_xlsx_output_path(path):
+    """Ensure the J.1 output path is an .xlsx workbook path."""
+    path = Path(path)
+    if path.suffix.lower() != ".xlsx":
+        corrected = path.with_suffix(".xlsx")
+        print(f"Warning: J.1 output must be .xlsx for automated updates; using {corrected}")
+        return corrected
+    return path
+
+
+def _convert_with_excel_com(source_path, output_path):
+    """
+    Convert .xlsb/.xls source workbook to .xlsx using desktop Excel.
+
+    openpyxl cannot read or write .xlsb workbooks. On Windows workstations with
+    Excel installed, pywin32 can drive Excel's own SaveAs conversion so the
+    existing workbook structure is preserved before rows are appended.
+    """
+    source_path = Path(source_path)
+    output_path = Path(output_path)
+
+    try:
+        import win32com.client as win32
+    except Exception as exc:
+        raise RuntimeError(
+            "The selected previous J.1 workbook is .xlsb/.xls, which must be "
+            "converted to .xlsx before the automation can append rows. Install "
+            "pywin32 and run this step on a Windows machine with Microsoft Excel, "
+            "or manually open the previous J.1 workbook in Excel, Save As .xlsx, "
+            "and rerun Step 5 using that .xlsx file."
+        ) from exc
+
+    excel = None
+    workbook = None
+    try:
+        excel = win32.gencache.EnsureDispatch("Excel.Application")
+        excel.DisplayAlerts = False
+        excel.Visible = False
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.exists():
+            output_path.unlink()
+
+        workbook = excel.Workbooks.Open(str(source_path.resolve()), ReadOnly=True)
+        # Excel FileFormat 51 = xlOpenXMLWorkbook (.xlsx)
+        workbook.SaveAs(str(output_path.resolve()), FileFormat=51)
+    finally:
+        if workbook is not None:
+            workbook.Close(SaveChanges=False)
+        if excel is not None:
+            excel.DisplayAlerts = True
+            excel.Quit()
+
+    if not output_path.exists():
+        raise RuntimeError(f"Excel conversion did not create expected output: {output_path}")
+
+
+def prepare_j1_current_workbook(previous_path, output_path):
+    """
+    Create an editable .xlsx current J.1 workbook from the selected prior J.1.
+
+    .xlsx/.xlsm inputs can be copied directly because openpyxl can read the
+    workbook package. .xlsb/.xls inputs require a real conversion instead of a
+    byte-for-byte copy because renaming an .xlsb file to .xlsx creates the
+    'File contains no valid workbook part' error seen in Step 5.
+    """
+    previous_path = Path(previous_path)
+    output_path = _force_xlsx_output_path(output_path)
+
+    if not previous_path.exists():
+        raise FileNotFoundError(f"J1 previous file not found at {previous_path}")
+
+    suffix = previous_path.suffix.lower()
+    if suffix in {".xlsx", ".xlsm"}:
+        shutil.copy2(previous_path, output_path)
+        print(f"Copied J1 previous file to: {output_path}")
+    elif suffix in {".xlsb", ".xls"}:
+        print(f"Converting J1 previous file from {suffix} to .xlsx: {output_path}")
+        _convert_with_excel_com(previous_path, output_path)
+        print(f"Converted J1 previous file to: {output_path}")
+    else:
+        raise ValueError(f"Unsupported J.1 previous file type: {previous_path.suffix}")
+
+    # Validate the output before later steps attempt to append rows.
+    try:
+        wb = load_workbook(output_path, read_only=True)
+        wb.close()
+    except Exception as exc:
+        raise RuntimeError(
+            f"The prepared J.1 output workbook is not a valid .xlsx file: {output_path}. "
+            "If the source file was .xlsb/.xls, confirm it was converted rather than renamed."
+        ) from exc
+
+    return output_path
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
 
-
-def configure_runtime():
-    global BASE_DIR, INPUT_DIR, OUTPUT_DIR, build_file, j1_previous_file_input, j1_previous_file
-
-    print("Select the files needed to update the J1 previous workbook...")
-    build_path = choose_file(
-        title="Select the generated Build workbook",
-        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
-        state_key="script05_build_file",
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Create the current J.1 workbook from selected prior J.1 and build workbooks."
     )
-    source_j1_path = choose_file(
-        title="Select the source J1 previous workbook",
-        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
-        state_key="script05_source_j1_previous_file",
-    )
-    output_j1_path = choose_save_file(
-        title="Choose where to save the updated J1 previous workbook",
-        default_name="j1_previous_file.xlsx",
-        filetypes=[("Excel Files", "*.xlsx")],
-        state_key="script05_output_j1_previous_file",
-    )
-
-    build_file = build_path
-    j1_previous_file_input = source_j1_path
-    j1_previous_file = output_j1_path
-    OUTPUT_DIR = output_j1_path.parent
-    INPUT_DIR = source_j1_path.parent
-    BASE_DIR = output_j1_path.parent
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    parser.add_argument("--build-file", help="Build workbook containing the Catalog sheet")
+    parser.add_argument("--j1-previous-file", help="Prior/current baseline J.1 workbook to copy and update")
+    parser.add_argument("--output-file", help="Output J.1 workbook path")
+    parser.add_argument("--current-opt-pd", type=int, default=CURRENT_OPT_PD,
+                        help="Current option period; defaults to calculated value")
+    return parser.parse_args(argv)
 
 
-def main():
-    """Main function to execute the J1_Example automation."""
-    configure_runtime()
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def configure_paths(args):
+    global build_file, j1_previous_file_input, j1_current_file, CURRENT_OPT_PD
+    CURRENT_OPT_PD = args.current_opt_pd
+    build_file = choose_existing_file(args.build_file, "Select the build workbook with the Catalog sheet", EXCEL_FILETYPES)
+    j1_previous_file_input = choose_existing_file(args.j1_previous_file, "Select the J.1 previous workbook", EXCEL_FILETYPES)
+    j1_current_file = choose_save_file(args.output_file, "Save the updated/current J.1 workbook as", "j1_current_file.xlsx", EXCEL_FILETYPES)
+    j1_current_file = _force_xlsx_output_path(j1_current_file)
 
-    # Copy the pristine j1_previous_file from input/ to output/ before modifying
-    if not j1_previous_file_input.exists():
-        print(f"Error: J1 previous file not found at {j1_previous_file_input}")
+
+def main(argv=None):
+    """Main function to execute the J1 automation."""
+    global j1_current_file
+
+    args = parse_args(argv)
+    configure_paths(args)
+    j1_current_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Copy or convert the selected J.1 previous file before modifying.
+    try:
+        j1_current_file = prepare_j1_current_workbook(j1_previous_file_input, j1_current_file)
+    except Exception as exc:
+        print(f"Error preparing J1 current workbook: {exc}")
         return
-    shutil.copy2(j1_previous_file_input, j1_previous_file)
-    print(f"Copied J1 previous file to: {j1_previous_file}")
 
     print("=" * 60)
     print("J1 PREVIOUS FILE AUTOMATION")
     print("=" * 60)
     print(f"Build File (Catalog source): {build_file}")
-    print(f"J1 Previous File: {j1_previous_file}")
+    print(f"J1 Current File: {j1_current_file}")
     print(f"\nCurrent Option Period: {CURRENT_OPT_PD}")
     print("=" * 60)
 
@@ -505,7 +595,7 @@ def main():
 
     # Step 2: Get maximum Price Id
     print("\nStep 2: Finding maximum Price Id...")
-    max_price_id = get_max_price_id(j1_previous_file)
+    max_price_id = get_max_price_id(j1_current_file)
     next_price_id = max_price_id + 1
 
     # Step 3: Categorize entries by TO Period
@@ -515,7 +605,7 @@ def main():
     # Step 4: Append to current OP sheet
     print("\nStep 4: Appending entries to sheets...")
     next_price_id = append_to_j1_sheet(
-        j1_previous_file,
+        j1_current_file,
         f'2B_Opt Pd {CURRENT_OPT_PD} Catalog',
         categorized['pd5'],
         next_price_id
@@ -523,7 +613,7 @@ def main():
 
     # Step 5: Append to future OP sheet
     next_price_id = append_to_j1_sheet(
-        j1_previous_file,
+        j1_current_file,
         f'2C_Opt Pd {CURRENT_OPT_PD + 1}-11 Catalog',
         categorized['pd6_11'],
         next_price_id
@@ -537,7 +627,7 @@ def main():
     print(f"  - TO Period {CURRENT_OPT_PD}: {len(categorized['pd5'])} entries")
     print(f"  - TO Period {CURRENT_OPT_PD + 1}-11: {len(categorized['pd6_11'])} entries")
     print(f"Final Price Id: {next_price_id - 1}")
-    print(f"J1 previous file updated: {j1_previous_file}")
+    print(f"J1 current file updated: {j1_current_file}")
     print("=" * 60)
 
 

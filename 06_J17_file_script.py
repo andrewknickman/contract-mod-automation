@@ -1,27 +1,27 @@
 import os
+import argparse
 import pandas as pd
 import re
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from file_selection import (
+    choose_existing_file, choose_save_file, read_excel_auto, EXCEL_FILETYPES,
+)
 
-from workflow_io import ask_integer, ask_text, choose_file, choose_save_file
 
-
-
-# ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = None
-INPUT_DIR = None
-OUTPUT_DIR = None
-
+# ─── Runtime-selected inputs ──────────────────────────────────────────────────
+# Assigned in main() from CLI arguments or file picker dialogs.
 j17_file = None
-j1_previous_file = None
+j1_previous_file_input = None
+j1_current_file = None
 eis_billing_file = None
 j17_updated_file = None
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 current_option_period = 5
-current_month = "December"
+DEFAULT_CURRENT_MONTH = "December"
+current_month = DEFAULT_CURRENT_MONTH
 
 
 def extract_month_from_filename(filename):
@@ -33,33 +33,36 @@ def extract_month_from_filename(filename):
     return ""
 
 
+def extract_month_name_from_filename(filename):
+    match = re.search(r'EIS Billing Detail - (\w+) (\d+)', filename.replace('_', ' '))
+    return match.group(1).title() if match else None
+
+
 def get_catalog_sheet_name(option_period):
     return f"2B_Opt Pd {option_period} Catalog"
 
 
 def load_existing_j17_data(filepath):
-    catalog_df = pd.read_excel(filepath, sheet_name='Catalog of Subscription CLINs')
-    active_df = pd.read_excel(filepath, sheet_name='J.17 Active Subscriptions')
-    expired_df = pd.read_excel(filepath, sheet_name='J.17 Expired Subscriptions')
+    catalog_df = read_excel_auto(filepath, sheet_name='Catalog of Subscription CLINs')
+    active_df = read_excel_auto(filepath, sheet_name='J.17 Active Subscriptions')
+    expired_df = read_excel_auto(filepath, sheet_name='J.17 Expired Subscriptions')
     return catalog_df, active_df, expired_df
 
 
 def load_draft_j1_catalog(filepath, option_period):
     sheet_name = get_catalog_sheet_name(option_period)
-    filepath_str = str(filepath)
-    engine = 'pyxlsb' if filepath_str.endswith('.xlsb') else None
-    df = pd.read_excel(filepath, sheet_name=sheet_name, engine=engine)
+    df = read_excel_auto(filepath, sheet_name=sheet_name)
     return df
 
 
 def load_billing_data(filepath):
-    bi_df = pd.read_excel(filepath, sheet_name='Billing Invoice (BI) Detail')
-    ba_df = pd.read_excel(filepath, sheet_name='Billing Adjustment (BA) Detail')
+    bi_df = read_excel_auto(filepath, sheet_name='Billing Invoice (BI) Detail')
+    ba_df = read_excel_auto(filepath, sheet_name='Billing Adjustment (BA) Detail')
     return bi_df, ba_df
 
 
 def filter_subscription_rows(df):
-    keywords = ['1 Year', '12 Month', 'Annual', 'License', 'Subscription']
+    keywords = ['Year', '12 Month', 'Annual', 'License', 'Subscription', 'Duration']
     pattern = '|'.join(keywords)
     mask = df['Verizon Case Description'].astype(str).str.contains(pattern, case=False, na=False)
     return df[mask].copy()
@@ -322,74 +325,49 @@ def save_to_excel(catalog_df, active_df, expired_df, original_file, output_path,
     wb.save(output_path)
 
 
-
-def configure_runtime():
-    global BASE_DIR, INPUT_DIR, OUTPUT_DIR
-    global j17_file, j1_previous_file, eis_billing_file, j17_updated_file
-    global current_option_period, current_month
-
-    print("Select the files needed to update the J17 workbook...")
-    source_j17_path = choose_file(
-        title="Select the source J17 workbook",
-        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
-        state_key="script06_source_j17_file",
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Create the updated J.17 workbook from selected J.17, J.1, and billing workbooks."
     )
-    updated_j1_path = choose_file(
-        title="Select the updated J1 previous workbook",
-        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
-        state_key="script06_updated_j1_previous_file",
-    )
-    billing_path = choose_file(
-        title="Select the EIS billing detail workbook",
-        filetypes=[("Excel Files", "*.xlsx *.xlsm *.xlsb *.xls")],
-        state_key="script06_eis_billing_file",
-    )
-    output_j17_path = choose_save_file(
-        title="Choose where to save the updated J17 workbook",
-        default_name="j17_updated_file.xlsx",
-        filetypes=[("Excel Files", "*.xlsx")],
-        state_key="script06_output_j17_file",
-    )
-    current_option_period = ask_integer(
-        title="Current Option Period",
-        prompt="Enter the option period to use when reading the updated J1 workbook.",
-        default=current_option_period,
-    )
-
-    month_value = extract_month_from_filename(str(billing_path))
-    derived_month = current_month
-    if month_value:
-        month_lookup = {
-            'JAN': 'January', 'FEB': 'February', 'MAR': 'March', 'APR': 'April',
-            'MAY': 'May', 'JUN': 'June', 'JUL': 'July', 'AUG': 'August',
-            'SEP': 'September', 'OCT': 'October', 'NOV': 'November', 'DEC': 'December',
-        }
-        derived_month = month_lookup.get(month_value[-3:], current_month)
-    current_month = ask_text(
-        title="Billing Month",
-        prompt="Enter the month name used to identify expired subscriptions.",
-        default=derived_month,
-    )
-
-    j17_file = source_j17_path
-    j1_previous_file = updated_j1_path
-    eis_billing_file = billing_path
-    j17_updated_file = output_j17_path
-    OUTPUT_DIR = output_j17_path.parent
-    INPUT_DIR = source_j17_path.parent
-    BASE_DIR = output_j17_path.parent
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    parser.add_argument("--j17-file", help="Source J.17 workbook")
+    parser.add_argument("--j1-previous-file", help="Baseline J.1 previous workbook")
+    parser.add_argument("--j1-current-file", help="Updated/current J.1 workbook")
+    parser.add_argument("--billing-file", help="EIS Billing Detail workbook")
+    parser.add_argument("--output-file", help="Output updated J.17 workbook path")
+    parser.add_argument("--option-period", type=int, default=current_option_period, help="Current option period")
+    parser.add_argument("--current-month", default=DEFAULT_CURRENT_MONTH,
+                        help="Month used to identify expired subscriptions; defaults to December to preserve original behavior")
+    return parser.parse_args(argv)
 
 
-def main():
-    configure_runtime()
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+def configure_paths(args):
+    global j17_file, j1_previous_file_input, j1_current_file, eis_billing_file
+    global j17_updated_file, current_option_period, current_month
+    current_option_period = args.option_period
+    j17_file = choose_existing_file(args.j17_file, "Select the source J.17 workbook", EXCEL_FILETYPES)
+    j1_previous_file_input = choose_existing_file(args.j1_previous_file, "Select the baseline J.1 previous workbook", EXCEL_FILETYPES)
+    j1_current_file = choose_existing_file(args.j1_current_file, "Select the updated/current J.1 workbook", EXCEL_FILETYPES)
+    eis_billing_file = choose_existing_file(args.billing_file, "Select the EIS Billing Detail workbook", EXCEL_FILETYPES)
+    j17_updated_file = choose_save_file(args.output_file, "Save the updated J.17 workbook as", "j17_updated_file.xlsx", EXCEL_FILETYPES)
+    current_month = args.current_month or DEFAULT_CURRENT_MONTH
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    configure_paths(args)
+    j17_updated_file.parent.mkdir(parents=True, exist_ok=True)
 
     month_value = extract_month_from_filename(str(eis_billing_file))
 
     catalog_df, active_df, expired_df = load_existing_j17_data(j17_file)
 
-    draft_j1_df = load_draft_j1_catalog(j1_previous_file, current_option_period)
+    sheet_name = get_catalog_sheet_name(current_option_period)
+    original_j1_df = read_excel_auto(j1_previous_file_input, sheet_name=sheet_name)
+    original_row_count = len(original_j1_df)
+
+    full_j1_df = load_draft_j1_catalog(j1_current_file, current_option_period)
+    draft_j1_df = full_j1_df.iloc[original_row_count:].copy()
+    print(f"J1 current file: {len(full_j1_df)} total rows, {original_row_count} from prior mods, {len(draft_j1_df)} from current mod")
 
     new_catalog_rows_df = get_new_catalog_rows(catalog_df, draft_j1_df)
 

@@ -1,0 +1,173 @@
+diff -ruN v011_baseline/mod-automation-main/02_overview_file_script.py work_v012/mod-automation-main/02_overview_file_script.py
+--- v011_baseline/mod-automation-main/02_overview_file_script.py	2026-06-10 01:40:46.000000000 +0000
++++ work_v012/mod-automation-main/02_overview_file_script.py	2026-06-10 01:44:18.263678389 +0000
+@@ -349,19 +349,17 @@
+ 
+ 
+ def _is_fr_required_status(value) -> bool:
+-    """
+-    Statuses that make the PR need an F&R workbook entry.
+-
+-    The Overview should not mark F&R Needed as Yes from one status set and then
+-    count zero F&R items from a different status set. Pending and N/A are the
+-    existing trigger statuses.
+-    """
++    """Statuses that make the PR need an F&R workbook entry."""
+     return _normalise_status_value(value) in {"pending", "n/a"}
+ 
+ 
+ def _is_fr_count_status(value) -> bool:
+-    """Statuses included in the Overview '# of CLINs' F&R count."""
+-    return _normalise_status_value(value) in {"pending", "approved", "n/a"}
++    """Statuses included in the Overview numeric F&R item count.
++
++    Business rule: count only Pending and Approved items. N/A can still make
++    F&R Needed = Yes, but it is not itself counted as an F&R item.
++    """
++    return _normalise_status_value(value) in {"pending", "approved"}
+ 
+ 
+ def _row_has_clin_item(sheet, row: int, headers: Dict[str, int], clin_col: Optional[int]) -> bool:
+@@ -457,8 +455,8 @@
+     results['clin_count'] = len(rows_for_counts)
+ 
+     # Use the same row scope for both the Yes/No flag and the numeric F&R count.
+-    # Previously, N/A could make F&R Needed = Yes while being excluded from
+-    # fr_count, which produced "Yes" with 0 counted F&R items.
++    # Important business distinction: N/A can trigger F&R Needed = Yes, but the
++    # numeric F&R count includes only Pending and Approved items.
+     results['fr_needed'] = 'Yes' if any(
+         _is_fr_required_status(row["fr_value"]) for row in rows_for_counts
+     ) else 'No'
+diff -ruN v011_baseline/mod-automation-main/CHANGELOG.md work_v012/mod-automation-main/CHANGELOG.md
+--- v011_baseline/mod-automation-main/CHANGELOG.md	2026-06-10 01:41:10.000000000 +0000
++++ work_v012/mod-automation-main/CHANGELOG.md	2026-06-10 01:45:00.807786197 +0000
+@@ -4,6 +4,27 @@
+ 
+ Versioning note: this project is currently continuing the `v00.04.xxx` iteration line unless/until the base version is intentionally bumped.
+ 
++## v00.04.012 - Overview F&R Count Business Rule Correction
++
++### Fixed
++
++- Corrected `02_overview_file_script.py` so the numeric Overview F&R item count includes only `Pending` and `Approved` F&R statuses.
++- Preserved the separate `F&R Needed = Yes` trigger behavior for `Pending` and `N/A` / `NA` statuses.
++- Preserved the CLIN-row scope behavior from `v00.04.010` / `v00.04.011`: when OpDiv-approved rows exist, the Overview uses those rows; when none exist, it falls back to all listed CLIN rows.
++
++### Clarified
++
++- `N/A` / `NA` can still make the Overview say `F&R Needed = Yes`, because the item still needs attention, but it is not counted as an F&R item.
++- `Approved` can be counted as an F&R item, but it does not by itself make `F&R Needed = Yes` because it is already approved.
++
++### Validation
++
++- Confirmed the updated overview script compiles with `python -m py_compile`.
++- Ran targeted in-memory workbook tests confirming:
++  - `N/A` produces `F&R Needed = Yes` and F&R count `0`.
++  - `Pending` produces `F&R Needed = Yes` and increments the F&R count.
++  - `Approved` increments the F&R count but does not by itself trigger `F&R Needed = Yes`.
++
+ ## v00.04.011 - Overview F&R Count Alignment Fix
+ 
+ ### Fixed
+diff -ruN v011_baseline/mod-automation-main/OVERVIEW_FR_COUNT_AUDIT.md work_v012/mod-automation-main/OVERVIEW_FR_COUNT_AUDIT.md
+--- v011_baseline/mod-automation-main/OVERVIEW_FR_COUNT_AUDIT.md	2026-06-10 01:41:22.000000000 +0000
++++ work_v012/mod-automation-main/OVERVIEW_FR_COUNT_AUDIT.md	2026-06-10 01:45:00.809152027 +0000
+@@ -2,41 +2,48 @@
+ 
+ ## Issue
+ 
+-The Overview step could mark a coversheet row as `F&R Needed = Yes` while writing `0` to the Overview F&R item count column.
++The Overview step had two related problems across the `v00.04.010` / `v00.04.011` fixes:
+ 
+-The immediate cause was that the script used different status sets for the two fields:
++1. The script needed to evaluate F&R status from the correct CLIN row scope.
++   - If one or more CLIN rows are marked `OpDiv Approval = Yes`, use those approved rows.
++   - If no CLIN rows are marked with OpDiv approval, fall back to all listed CLIN rows.
+ 
+-- `F&R Needed` was triggered by `Pending`, `N/A`, or `NA`.
+-- The numeric F&R count only counted `Pending` or `Approved`.
++2. The numeric F&R count was briefly expanded too far in `v00.04.011`.
++   - `N/A` / `NA` can mean the PR still needs F&R attention.
++   - But `N/A` / `NA` should not be counted as an F&R item.
+ 
+-That meant an `N/A` row could cause `F&R Needed = Yes` but still not be included in the count.
++## Corrected rule in v00.04.012
+ 
+-## Fix in v00.04.011
++`02_overview_file_script.py` now applies these rules:
+ 
+-`02_overview_file_script.py` now uses the same CLIN-row scope for both fields:
++### Row scope
+ 
+-- If one or more CLIN rows are marked `OpDiv Approval = Yes`, the Overview F&R logic uses those approved rows.
+-- If no CLIN rows are marked with OpDiv approval, the Overview F&R logic falls back to all listed CLIN rows.
++- If any rows are marked `OpDiv Approval = Yes`, both the `F&R Needed` flag and numeric F&R count evaluate those approved rows only.
++- If no rows are marked `OpDiv Approval = Yes`, both values evaluate all listed CLIN rows.
+ 
+-The F&R item count now includes these statuses:
++### F&R Needed flag
++
++The Overview writes `F&R Needed = Yes` when an in-scope row has one of these F&R statuses:
+ 
+ - `Pending`
+-- `Approved`
+-- `N/A`
+-- `NA`
+-- common N/A variants such as `N.A.` and `Not Applicable`
++- `N/A` / `NA` / common N/A variants
++
++`Approved` alone does not make `F&R Needed = Yes`, because it is already approved.
+ 
+-The `F&R Needed` flag still uses the original trigger statuses:
++### Numeric F&R item count
++
++The numeric F&R count includes only these statuses:
+ 
+ - `Pending`
+-- `N/A` / `NA`
++- `Approved`
+ 
+-So approved-only F&R rows may be counted as F&R items, but they do not by themselves make `F&R Needed = Yes` because the F&R is already approved.
++`N/A` / `NA` does not increment the F&R count.
+ 
+ ## Validation
+ 
+ Targeted in-memory workbook tests confirmed:
+ 
+-1. A coversheet with no OpDiv approval rows and an `N/A` F&R status now produces `F&R Needed = Yes` and an F&R count of `1`.
+-2. A coversheet with approved rows uses only the approved rows for both the F&R yes/no flag and the F&R count.
+-3. A pending status on a non-approved row does not trigger F&R when approved rows exist elsewhere in the same CLIN table.
++1. A coversheet with no OpDiv approval rows and one `N/A` F&R status produces `F&R Needed = Yes` and F&R count `0`.
++2. A coversheet with no OpDiv approval rows and statuses `Pending`, `N/A`, and `Approved` produces `F&R Needed = Yes` and F&R count `2`.
++3. A coversheet with only `Approved` produces `F&R Needed = No` and F&R count `1`.
++4. When approved rows exist, non-approved rows are excluded from both the flag and the count.
+diff -ruN v011_baseline/mod-automation-main/README.md work_v012/mod-automation-main/README.md
+--- v011_baseline/mod-automation-main/README.md	2026-06-10 01:41:21.000000000 +0000
++++ work_v012/mod-automation-main/README.md	2026-06-10 01:45:00.808734427 +0000
+@@ -36,6 +36,7 @@
+ | `PATH_FLEXIBILITY_REPORT.md` | Detailed report of removed hard-coded paths and filename assumptions. |
+ | `path_flexibility.diff` | Patch diff showing the path/file-selection refactor. |
+ | `REGRESSION_AUDIT.md` | Comparison notes confirming original script functions were preserved and documenting the controller preflight fix. |
++| `OVERVIEW_FR_COUNT_AUDIT.md` | Documents the Overview F&R yes/no and numeric count rules. |
+ 
+ ## Requirements
+ 
+@@ -263,7 +264,7 @@
+ 3. That PR workbook contains a worksheet whose name includes `comp`, such as `Comps` or `COMP`.
+ 4. The comp worksheet contains rows that the script can extract into F&R records.
+ 
+-The Overview script determines `F&R Needed` from the `CLIN Table (Current OP)` sheet. In `v00.04.010`, if no CLIN rows are marked with OpDiv approval, the Overview script now falls back to the listed CLIN rows and their F&R statuses instead of automatically producing zero CLINs / no F&R need. In `v00.04.011`, the F&R yes/no flag and F&R count now use the same row scope, and `N/A` / `NA` statuses are counted as F&R items when they are what caused `F&R Needed = Yes`.
++The Overview script determines `F&R Needed` from the `CLIN Table (Current OP)` sheet. In `v00.04.010`, if no CLIN rows are marked with OpDiv approval, the Overview script now falls back to the listed CLIN rows and their F&R statuses instead of automatically producing zero CLINs / no F&R need. In `v00.04.011`, the F&R yes/no flag and F&R count were aligned to use the same row scope. In `v00.04.012`, the numeric F&R count was corrected to include only `Pending` and `Approved` statuses. `N/A` / `NA` can still trigger `F&R Needed = Yes`, but it is not counted as an F&R item.
+ 
+ Common reasons a PR may not receive an F&R tab:
+ 
+Binary files v011_baseline/mod-automation-main/__pycache__/01_final_coversheet_generation_script.cpython-313.pyc and work_v012/mod-automation-main/__pycache__/01_final_coversheet_generation_script.cpython-313.pyc differ
+Binary files v011_baseline/mod-automation-main/__pycache__/02_overview_file_script.cpython-313.pyc and work_v012/mod-automation-main/__pycache__/02_overview_file_script.cpython-313.pyc differ
+Binary files v011_baseline/mod-automation-main/__pycache__/03_F_and_R_script.cpython-313.pyc and work_v012/mod-automation-main/__pycache__/03_F_and_R_script.cpython-313.pyc differ
+Binary files v011_baseline/mod-automation-main/__pycache__/04_build_file_script.cpython-313.pyc and work_v012/mod-automation-main/__pycache__/04_build_file_script.cpython-313.pyc differ
+Binary files v011_baseline/mod-automation-main/__pycache__/05_J1_script.cpython-313.pyc and work_v012/mod-automation-main/__pycache__/05_J1_script.cpython-313.pyc differ
+Binary files v011_baseline/mod-automation-main/__pycache__/06_J17_file_script.cpython-313.pyc and work_v012/mod-automation-main/__pycache__/06_J17_file_script.cpython-313.pyc differ
+Binary files v011_baseline/mod-automation-main/__pycache__/07_MFR_walkthrough_script.cpython-313.pyc and work_v012/mod-automation-main/__pycache__/07_MFR_walkthrough_script.cpython-313.pyc differ
+Binary files v011_baseline/mod-automation-main/__pycache__/file_selection.cpython-313.pyc and work_v012/mod-automation-main/__pycache__/file_selection.cpython-313.pyc differ
+Binary files v011_baseline/mod-automation-main/__pycache__/mod_automation_ui.cpython-313.pyc and work_v012/mod-automation-main/__pycache__/mod_automation_ui.cpython-313.pyc differ
